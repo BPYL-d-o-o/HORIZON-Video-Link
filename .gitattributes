@@ -1,0 +1,7 @@
+# Shell scripts and files copied onto Linux boards keep LF line endings on every checkout (Windows included):
+# a CRLF script fails on the Luckfox and in WSL.
+*.sh text eol=lf
+tools/git-hooks/* text eol=lf
+luckfox_image/** text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

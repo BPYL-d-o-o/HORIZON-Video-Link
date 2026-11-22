@@ -1,0 +1,1 @@
+{ "identifier": "default", "description": "the overlay: events and the app's own commands", "windows": ["main"], "permissions": ["core:default"] }

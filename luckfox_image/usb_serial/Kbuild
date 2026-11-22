@@ -1,0 +1,5 @@
+# The Linux USB serial gadget function (CDC ACM) as loadable modules for the stock Luckfox Pico kernel, which has
+# configfs gadgets but not this function. Sources are copied from the SDK's kernel tree by build_usb_serial.sh.
+obj-m += u_serial.o usb_f_acm.o
+usb_f_acm-y := f_acm.o
+ccflags-y += -I$(srctree)/drivers/usb/gadget -I$(srctree)/drivers/usb/gadget/function

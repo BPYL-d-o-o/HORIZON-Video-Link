@@ -1,0 +1,57 @@
+#!/bin/sh
+# Horizon Dev Air (Luckfox Pico + RP2354A + LR2021): starts the video transmitter at boot.
+# Part of the Horizon Dev camera image (luckfox_image/build_image.sh). The image keeps its files in
+# /usr/share/horizon; this script copies the programs to /userdata/horizon_vtx (where service.sh
+# expects them; the settings file there is kept), updates the RP2354A radio controller over SWD when the image
+# carries other firmware than it last flashed (rp2354_update.sh), then starts the service.
+share=/usr/share/horizon
+dir=/userdata/horizon_vtx
+
+install_files() {
+    mkdir -p "$dir"
+    for f in hz_vtx service.sh; do
+        cmp -s "$share/$f" "$dir/$f" 2>/dev/null || { cp "$share/$f" "$dir/$f.new" && chmod 755 "$dir/$f.new" && mv "$dir/$f.new" "$dir/$f"; }
+    done
+    [ -f "$dir/horizon_vtx.conf" ] || cp "$share/horizon_vtx.conf" "$dir/horizon_vtx.conf"
+    sync
+}
+
+# Boot counter: the Air has no real-time clock (its log says 1 January 1970 and lives in RAM), so every start is
+# numbered instead. Kept on the card in $dir/boot_count; this boot's number in /run/horizon_boot, reported by
+# horizon_pair.sh "W" and the self-check, and logged as "horizon: boot N".
+count_boot() {
+    n=$(cat "$dir/boot_count" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    n=$((n + 1))
+    echo "$n" >"$dir/boot_count.new" && mv "$dir/boot_count.new" "$dir/boot_count"
+    echo "$n" >/run/horizon_boot
+    logger -t horizon "boot $n"
+}
+
+case "${1:-start}" in
+start)
+    mkdir -p "$dir"
+    [ -f /run/horizon_boot ] || count_boot   # once per power-up, not on a manual restart
+    install_files
+    # in the background: the RP2354A update takes ~20 s and must not hold up the rest of the boot
+    ( sh "$share/rp2354_update.sh" boot 2>&1 | logger -t horizon_vtx ) </dev/null >/dev/null 2>&1 &
+    # the self-check every 30 s, shown on the Luckfox's LED; not-ok parts to syslog (tag horizon_check), the latest
+    # report in /run/horizon_check.txt (the setup site asks for a fresh one over USB)
+    if [ -f "$share/horizon_led.sh" ] && ! ps | grep -v grep | grep -q horizon_led.sh; then
+        ( sh "$share/horizon_led.sh" 2>&1 | logger -t horizon_led ) </dev/null >/dev/null 2>&1 &
+    fi
+    # pairing with the setup site over the USB serial port ("Horizon Dev Air")
+    if [ -f "$share/horizon_pair.sh" ] && ! ps | grep -v grep | grep -q horizon_pair.sh; then
+        ( sh "$share/horizon_pair.sh" 2>&1 | logger -t horizon_pair ) </dev/null >/dev/null 2>&1 &
+    fi
+    ;;
+install)  # the programs from /usr/share/horizon into /userdata (horizon_update.sh, after an update)
+    install_files
+    ;;
+stop|restart|status)
+    exec sh "$dir/service.sh" "$1"
+    ;;
+*)
+    echo "usage: $0 start|install|stop|restart|status"; exit 2
+    ;;
+esac

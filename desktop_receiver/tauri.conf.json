@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Horizon Receiver",
+  "version": "0.1.0",
+  "identifier": "si.bpyl.horizon.receiver",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "visible": false, "title": "Horizon Receiver: Settings", "width": 1000, "height": 1200, "decorations": false, "skipTaskbar": true, "resizable": false, "shadow": false }
+    ]
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.ico"] }
+}

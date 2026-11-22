@@ -1,0 +1,33 @@
+# ---- build outputs (rebuild from source)
+lora_vlink/build/
+luckfox_vtx/build/
+pi5_vtx/frame_enc
+
+# ---- Python environments and packaged apps
+.venv/
+.venv-win/
+__pycache__/
+*.pyc
+
+# ---- runtime output (logs, captures, recordings)
+logs/
+*.log
+*.rxlog
+pi5_vtx/headers.bin
+LoRaVideoRX/
+HorizonReceiver/
+
+# ---- large test media
+*.yuv
+*.mp4
+*.hevc
+*.ivf
+
+# ---- old hand-made backups (git history replaces these)
+*.bak-*
+
+# ---- editor / OS junk
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

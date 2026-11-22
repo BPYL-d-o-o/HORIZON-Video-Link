@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Horizon Receiver: Settings</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<nav aria-label="Settings">
+  <div class="brand"><img src="img/horizon-star.svg" alt=""><img src="img/horizon-wordmark.svg" alt="Horizon" class="word"><button class="x" id="close" title="Close settings (S or Esc)" aria-label="Close settings">✕</button></div>
+  <a href="#live" data-page="live">Graphs</a>
+  <a href="#link" data-page="link">Settings</a>
+  <a href="#recordings" data-page="recordings">Recordings</a>
+  <a href="#flight" data-page="flight" id="nav-flight" hidden>Flight</a>
+  <a href="#budget" data-page="budget">Link budget</a>
+  <div class="grow"></div>
+  <div class="who mono" id="who">no receiver</div>
+</nav>
+
+<main id="page-live" class="page">
+  <header>
+    <h1>Graphs</h1>
+    <div class="tools">
+      <div class="seg" id="live-range" role="group" aria-label="Time shown">
+        <button data-s="120" class="on">2 min</button><button data-s="600">10 min</button><button data-s="3600">1 h</button><button data-s="0" title="Everything since the app started (the last 6 hours at most)">All</button>
+      </div>
+      <button class="btn" data-graphs="live">Graphs…</button>
+    </div>
+  </header>
+  <div class="tiles" id="live-tiles"></div>
+  <div class="counters" id="live-counters" title="Since the app started"></div>
+  <div class="charts" id="live-charts"></div>
+</main>
+
+<main id="page-link" class="page" hidden>
+  <header><h1>Settings</h1></header>
+  <section class="card">
+    <div class="row"><span class="dot" id="lk-dot"></span><h2 id="lk-title">No receiver</h2></div>
+    <div class="facts">
+      <div><span class="k" id="lk-freq-k">FREQUENCY</span><span class="v" id="lk-freq">–</span></div>
+      <div><span class="k" title="What the Air unit's LR2021 chip transmits (a module's amplifier adds its gain)">LR2021 POWER</span><span class="v" id="lk-pwr">–</span></div>
+      <div><span class="k">HOPPING</span><span class="v" id="lk-hop">–</span></div>
+      <div><span class="k">RECEIVER</span><span class="v small" id="lk-port">–</span></div>
+    </div>
+    <div class="muted small" id="lk-profile"></div>
+    <div id="lk-problems" class="problems-list"></div>
+  </section>
+  <section class="card">
+    <div><h2>Change over the air</h2>
+      <p class="muted">Sent to the Air unit through the Ground. Lasts until either board restarts; to keep it, Pair both boards on the setup site.</p></div>
+    <div class="fields">
+      <label title="at the LR2021 chip, −9.5 to 22 dBm in 0.5 dB steps; a module with an amplifier adds its gain. In the 2.4 GHz band it stays at −19.5 dBm.">LR2021 power (dBm)<input id="f-pwr" inputmode="decimal"></label>
+      <label id="f-freq-l">Frequency (MHz)<input id="f-freq" inputmode="decimal"></label>
+    </div>
+    <label class="switch"><input type="checkbox" id="f-hop" role="switch"><span class="track"><span class="knob"></span></span>
+      <span><b>Frequency hopping</b><span class="muted small"> · the link moves between channels across a band, so one busy channel costs only part of the packets</span></span></label>
+    <div id="f-hop-box" class="hopbox" hidden>
+      <div class="fields">
+        <label>Band from (MHz)<input id="f-lo" inputmode="decimal"></label>
+        <label>Band to (MHz)<input id="f-hi" inputmode="decimal"></label>
+        <label>Channels<input id="f-hopn" inputmode="numeric" value="8"></label>
+      </div>
+      <div class="small" id="f-hop-plan"></div>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="lk-apply">Apply over the air</button>
+      <span class="muted small" id="lk-msg"></span>
+    </div>
+  </section>
+  <section class="card">
+    <div class="row spread">
+      <div><h2>Callsign heard</h2><p class="muted">The Air unit identifies at least every 5 minutes. It is set on the setup site.</p></div>
+      <div class="right"><span class="mono big" id="cs-heard">–</span><span class="small muted" id="cs-when"></span></div>
+    </div>
+  </section>
+  <section class="card">
+    <div><h2>Picture</h2><p class="muted">How the video is shown on this screen. Recordings and exports are not changed.</p></div>
+    <div class="fields">
+      <label style="max-width: 300px">Orientation<select id="pic-flip">
+        <option value="0">As the camera sends it</option><option value="3">Rotated 180° (camera mounted upside down)</option></select></label>
+    </div>
+  </section>
+  <details class="card dev">
+    <summary><h2>Developer tools</h2><span class="muted small">testing how the link behaves under loss</span></summary>
+    <div><h3>Injected packet loss</h3>
+      <p class="muted small">Drops received packets as if their slot was missed, before error correction and decoding: the statistics, the picture and recordings all see it. Off whenever the app starts; the bar warns while it is on.</p></div>
+    <div class="fields">
+      <label>Loss (%)<input id="inj-pct" inputmode="decimal" value="0"></label>
+      <label>Average burst (slots)<input id="inj-burst" inputmode="decimal" value="1"></label>
+    </div>
+    <div class="row"><button class="btn primary" id="inj-apply">Apply</button><button class="btn" id="inj-off">Off</button><span class="small muted" id="inj-msg">1 slot = 18.7 ms; 1 = independent losses</span></div>
+  </details>
+</main>
+
+<main id="page-recordings" class="page" hidden>
+  <header><h1>Recordings</h1></header>
+  <section class="card row">
+    <div class="grow">
+      <div class="row"><h2>Recording</h2><span class="rec mono" id="rec-chip" hidden><span class="recdot"></span><span id="rec-text"></span></span></div>
+      <p class="muted">Every packet as received, with the link statistics: the video and the graphs on one timeline.</p>
+    </div>
+    <button class="btn" id="rec-btn">Record (R)</button>
+  </section>
+  <section class="card grow-card">
+    <div class="row spread">
+      <h2>Saved</h2>
+      <div class="row"><span class="mono small muted" id="out-dir"></span><button class="btn small" id="open-dir">Open folder</button><button class="btn small" id="change-dir">Change…</button><button class="btn small" id="open-other">Open other…</button></div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>STARTED</th><th>LENGTH</th><th>LINK</th><th>SIZE</th><th></th></tr></thead>
+        <tbody id="sessions"></tbody>
+      </table>
+    </div>
+    <p class="muted small">Open shows the flight here and plays it in the viewer: the video with its graphs and problems on one timeline, from any moment. Export video… saves an .mp4 to share.</p>
+  </section>
+</main>
+
+<main id="page-flight" class="page" hidden>
+  <header class="row">
+    <a href="#recordings">← Recordings</a>
+    <h1 id="fl-title">Flight</h1>
+    <span class="mono muted" id="fl-sub"></span>
+    <span class="grow"></span>
+    <button class="btn" data-graphs="flight">Graphs…</button>
+  </header>
+  <div class="tiles small-tiles" id="fl-tiles"></div>
+  <div class="flight-body">
+    <figure class="card timeline"><canvas id="fl-canvas" aria-label="The flight's timeline"></canvas><div class="tip" id="fl-tip" hidden></div></figure>
+    <aside>
+      <section class="card">
+        <h2>Problems</h2>
+        <div id="fl-problems" class="problems"></div>
+      </section>
+      <section class="card">
+        <h2>Export video</h2>
+        <p class="muted small" id="fl-sel">Drag on the timeline to pick a part.</p>
+        <button class="btn primary" id="fl-export-sel" disabled>Export selection…</button>
+        <button class="btn" id="fl-export-all">Export whole flight…</button>
+        <p class="small" id="fl-export-msg"></p>
+      </section>
+      <p class="muted small">Click the timeline or a problem: the viewer jumps there. Space in the viewer plays and pauses; Esc goes back to live.</p>
+    </aside>
+  </div>
+</main>
+
+<main id="page-budget" class="page" hidden>
+  <header>
+    <div><h1>Link budget</h1><p class="muted small">Planning only: what range and picture to expect. Nothing here changes the link.</p></div>
+    <div class="tools">
+      <button class="btn" id="lb-current" title="Frequency and TX power from the Ground">Use current link</button>
+      <button class="btn" id="lb-reset">Reset</button>
+      <button class="btn" id="lb-copy">Copy results</button>
+    </div>
+  </header>
+  <div class="tiles" id="lb-tiles"></div>
+  <div id="lb-inputs" class="lb-inputs"></div>
+  <figure class="card chart lb-chart">
+    <figcaption><b>Received power over distance</b><span id="lb-legend"></span></figcaption>
+    <canvas id="lb-canvas" aria-label="Received power over distance with the receiver's sensitivity"></canvas>
+    <div class="tip" id="lb-tip" hidden></div>
+  </figure>
+  <section class="card">
+    <h2>Practical range <span class="muted small" id="lb-range-sub" style="font-weight:400"></span></h2>
+    <div id="lb-ranges" class="ranges"></div>
+  </section>
+  <div class="lb-tables" id="lb-tables"></div>
+  <p class="muted small">Planning estimates from standard propagation models, not measurements: terrain, antenna patterns, interference and receiver overload change them, usually downwards. Heavier coding rates change the time on air here but not the sensitivity.</p>
+</main>
+
+<div class="pop" id="graphs-pop" hidden role="dialog" aria-label="Graphs">
+  <div class="row spread"><h2>Graphs</h2><button class="btn small" id="graphs-close">Done</button></div>
+  <div id="graphs-list" class="checks"></div>
+</div>
+
+<script src="dev-mock.js"></script>
+<script src="linkbudget.js"></script>
+<script src="app.js"></script>
+<script src="budget.js"></script>
+</body>
+</html>

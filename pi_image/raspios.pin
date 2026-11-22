@@ -1,0 +1,4 @@
+# The Raspberry Pi OS the Horizon Pi image is built from (pi_image/build_pi_image.sh): Lite, 64-bit, verified by SHA-256.
+# The bench Pi 5 transmitter runs this release. Newer: https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+url=https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2026-10-06/2026-10-06-raspios-trixie-arm64-lite.img.xz
+sha256=483db18a48da399b5b7022ffae9a07bc6d99daab30e593aedac09b69ff422843
