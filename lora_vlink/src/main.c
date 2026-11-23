@@ -557,6 +557,7 @@ static unsigned rec_n;
 #define HOST_RING_SIZE (1u << HOST_RING_BITS)
 static uint8_t host_ring[HOST_RING_SIZE] __attribute__((aligned(HOST_RING_SIZE)));
 static unsigned host_dma, host_rd, host_tx_dma;
+static uint32_t g_host_bytes;                   // bytes taken from the host ring (the "H" line's host link counters)
 static void host_status_publish(void);
 #ifndef VLIVE_HOST_PIO
 static void usb_host_poll_throttled(void);
@@ -1085,6 +1086,7 @@ static void poll_host(void) {
     int avail = (int)((wr - host_rd) & (HOST_RING_SIZE - 1));
     if (avail > 64) avail = 64;  // bound the time spent per call
     if (avail > 0) g_host_seen_us = time_us_64();
+    g_host_bytes += (uint32_t)avail;
     uint32_t ok0 = rec_ok;
     // Bytes that are not part of a record (the Pi's status-poll zeros) are always consumed. A record start
     // is only taken when the queue has room for it, otherwise it stays in the ring and the sender (paced from
@@ -1659,6 +1661,19 @@ static void run_live_tx(void) {
                    (unsigned long)sent, (unsigned long)fail, (unsigned long)late, (unsigned long)data,
                    (unsigned long)idle, (unsigned long)rec_bad, (unsigned long)air_min, (unsigned long)air_max,
                    (unsigned long)g_idents);
+            // The host link over the same 5 s (a stalled Pi sender: which side stopped): bytes the host sent, records
+            // taken and the bad-record total, a record half received, bytes waiting in the ring, the queue, whether
+            // the two SPI DMA channels (MOSI ring, MISO status frame) still run, and when the host last sent a byte.
+            {
+                static uint32_t prev_bytes, prev_ok;
+                unsigned wr = (unsigned)((uintptr_t)dma_channel_hw_addr(host_dma)->write_addr - (uintptr_t)host_ring) & (HOST_RING_SIZE - 1);
+                printf("H bytes=%lu records=%lu bad_total=%lu partial=%u ring=%u queue=%lu rx_dma=%d tx_dma=%d host_ago_ms=%lu\n",
+                       (unsigned long)(g_host_bytes - prev_bytes), (unsigned long)(rec_ok - prev_ok), (unsigned long)rec_bad,
+                       rec_n, (wr - host_rd) & (HOST_RING_SIZE - 1), (unsigned long)(lq_head - lq_tail),
+                       (int)dma_channel_is_busy(host_dma), (int)dma_channel_is_busy(host_tx_dma),
+                       (unsigned long)(g_host_seen_us ? (time_us_64() - g_host_seen_us) / 1000u : 0u));
+                prev_bytes = g_host_bytes; prev_ok = rec_ok;
+            }
             if (g_hop.n) printf("C hop freq_hz=%lu n=%u spacing_hz=%lu\n", (unsigned long)g_freq_hz, g_hop.n,
                                 (unsigned long)g_hop.step_khz * 1000u);
             sent = fail = data = idle = 0;

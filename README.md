@@ -5,7 +5,7 @@ over an LR2021 radio; a USB receiver (the Ground) brings it to a computer, where
 shows it.
 
 This is the software of **Horizon Dev**: firmware, transmitter programs and receivers.
-Set up and flash the hardware from the browser at **https://horizon.dev.bpyl.si/** (Chrome or Edge).
+Set up and flash the hardware from the browser at **https://horizon.bpyl.si/** (Chrome or Edge).
 
 > Experimental, for research and education: read [DISCLAIMER.md](DISCLAIMER.md). Transmit only on frequencies and at
 > powers you are allowed to use where you are.

@@ -94,6 +94,13 @@ class Link:
         self.freq_hz = None
         self.pwr = None
         self.spi_errors = 0
+        # link health (link_watch): transfers read, of them with a valid status frame, the last valid one, and the
+        # first bytes of the newest transfer that had none
+        self.dev = dev
+        self.reads = self.frames_ok = self.no_frame = 0
+        self.last_frame_t = time.monotonic()
+        self.bad_raw = b""
+        self.feed = {"sent": 0, "full": 0, "empty": 0, "blind": 0}   # feeder decisions (see feeder())
         if start_poll:
             threading.Thread(target=self._poll, daemon=True).start()
 
@@ -133,8 +140,24 @@ class Link:
                 d = lead - 0.0015 if lead > 0.0025 else 0.0003
             time.sleep(d)
 
+    def reopen(self):
+        """Closes and reopens the SPI device and forgets the link state the status frames gave (stall recovery):
+        records in flight, queue depth and the slot timing are learnt again from the next valid frame."""
+        with self.spi_lock:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = self._open(self.dev)
+        with self.lock:
+            self.written = self.accepted
+            self.depth = None
+            self.slot_known = False
+            self._dts = []
+
     def _status(self, rx):
         """Find the newest valid status frame in the bytes read and publish it."""
+        self.reads += 1
         best = None
         for i in range(len(rx) - 31):
             if rx[i] == 0xC3 and rx[i + 1] == 0x3C:
@@ -145,7 +168,11 @@ class Link:
                 if x == f[31]:
                     best = f
         if best is None:
+            self.no_frame += 1
+            self.bad_raw = bytes(rx[:40])
             return
+        self.frames_ok += 1
+        self.last_frame_t = time.monotonic()
         f = best
         depth, ev = f[2], f[3]
         acc = struct.unpack_from("<I", f, 4)[0]
@@ -504,6 +531,7 @@ def feeder(link, sched, low, lead_s, stop, tap=None):
             if rec is None:
                 time.sleep(0.0005)
             else:
+                link.feed["blind"] += 1
                 hand(rec)
             continue
         n = int((now - st) / slot_s)
@@ -515,14 +543,75 @@ def feeder(link, sched, low, lead_s, stop, tap=None):
         done = (st, n)
         p = link.pending()
         if p is None or p > low:
+            link.feed["full"] += 1
             if trace:
                 print("feed %.4f SKIP pending=%s" % (time.monotonic(), p), file=sys.stderr)
             continue
         rec = sched.next_record()
         if rec is not None:
+            link.feed["sent"] += 1
             hand(rec)
+        else:
+            link.feed["empty"] += 1
         if trace:
             print("feed %.4f %s" % (time.monotonic(), "-" if rec is None else "S"), file=sys.stderr)
+
+
+STALL_S = 2.0        # video waits but the RP2350 has taken no record for this long: a stall
+STALL_REOPEN_S = 3.0  # then: reopen SPI and relearn the link state
+STALL_EXIT_S = 10.0   # still stalled: exit (systemd restarts the sender)
+
+
+def link_watch(link, sched, stop):
+    """Once a second, independent of the camera and the encoder: is the link moving? A stall (video waiting, the
+    RP2350's accepted-record counter frozen) is logged with the link state (EVENT spi_stall), recovered by reopening SPI
+    after STALL_REOPEN_S and, if that does not help, by exiting after STALL_EXIT_S (FATAL; systemd restarts the
+    sender). Every 5 s a "link:" line, also while frames are skipped."""
+    last_acc, progress_t = link.accepted, time.monotonic()
+    stall_t, reopened = None, False
+    prev = (link.reads, link.frames_ok, link.no_frame, dict(link.feed), link.accepted, link.spi_errors)
+    rep_t = time.monotonic()
+
+    def state():
+        age = time.monotonic() - link.last_frame_t
+        return ("depth=%s accepted=%s written=%s pending=%s queued=%d slot_known=%s seq=%s frame_age=%.2fs "
+                "spi_errors=%d feed=%s" % (link.depth, link.accepted, link.written, link.pending(), sched.queued_packets(),
+                                           link.slot_known, link.seq, age, link.spi_errors, link.feed))
+
+    while not stop.wait(1.0):
+        now = time.monotonic()
+        acc = link.accepted
+        if acc != last_acc:
+            last_acc, progress_t = acc, now
+            if stall_t is not None:
+                print("EVENT spi_recovered after %.1fs%s" % (now - stall_t, " (SPI reopened)" if reopened else ""), flush=True)
+                stall_t, reopened = None, False
+        elif sched.queued_packets() > 0 and now - progress_t > STALL_S:
+            if stall_t is None:
+                stall_t = now
+                print("EVENT spi_stall no record taken for %.1fs: %s last_bad_read=%s" % (now - progress_t, state(),
+                                                                                         link.bad_raw.hex()), flush=True)
+            if not reopened and now - stall_t >= STALL_REOPEN_S and getattr(link, "dev", None):  # (SPI only)
+                reopened = True
+                try:
+                    link.reopen()
+                    print("EVENT spi_reopen: %s" % state(), flush=True)
+                except OSError as e:
+                    print("ERROR spi_reopen failed: %s" % e, flush=True)
+            if now - stall_t >= STALL_EXIT_S:
+                print("FATAL spi_stall for %.0fs, not recovered by reopening SPI: %s last_bad_read=%s" % (
+                    now - stall_t, state(), link.bad_raw.hex()), flush=True)
+                os._exit(4)
+        if now - rep_t >= 5.0:
+            cur = (link.reads, link.frames_ok, link.no_frame, dict(link.feed), link.accepted, link.spi_errors)
+            dt = now - rep_t
+            feed = {k: cur[3][k] - prev[3].get(k, 0) for k in cur[3]}
+            print("link: reads %.0f/s, status frames ok %d, none %d, records taken %d, feed sent %d full %d empty %d "
+                  "blind %d, spi errors %d, depth=%s frame_age=%.2fs" % (
+                      (cur[0] - prev[0]) / dt, cur[1] - prev[1], cur[2] - prev[2], cur[4] - prev[4], feed["sent"],
+                      feed["full"], feed["empty"], feed["blind"], cur[5] - prev[5], link.depth,
+                      now - link.last_frame_t), flush=True)
+            prev, rep_t = cur, now
 
 
 def control(path, link, stop):
@@ -748,6 +837,8 @@ def main(argv=None, link=None):
     th_feed = threading.Thread(target=feeder, args=(link, sched, args.low, args.lead_ms / 1000.0, feed_stop,
                                                      getattr(link, "tap", None)), daemon=True)
     th_feed.start()
+    if hasattr(link, "frames_ok"):   # (a test's stand-in link has no counters)
+        threading.Thread(target=link_watch, args=(link, sched, feed_stop), name="link_watch", daemon=True).start()
 
     period = 1.0 / fps
     next_t = time.monotonic()
