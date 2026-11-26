@@ -14,3 +14,11 @@ By sending a contribution (a pull request, patch, or code in an issue) you agree
 
 You keep the copyright in your contribution. Say so in the pull request if a contribution comes under other terms,
 and we will discuss it before merging.
+
+## Before a pull request
+
+- `bash test/run.sh all` passes (CI runs it too, with the desktop app's tests); with hardware, also the device you
+  changed (`bash test/run.sh` lists them).
+- Formatting: `cargo fmt` for Rust (`desktop_receiver/rustfmt.toml`); for C and C++ `.clang-format` applies to new
+  and changed code (existing files are not reformatted wholesale); `.editorconfig` for the rest.
+- Keep tests apart from the code they test, in a `test/` folder next to it.

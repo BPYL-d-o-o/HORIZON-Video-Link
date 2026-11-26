@@ -25,8 +25,8 @@ const LBF = [
   ]],
   ['Packets and video', false, [
     ['payload', 'Radio packet', 'B'],
-    ['overhead', 'Overhead in a packet', 'B', 'Format v4: sequence 2 + header 4 + CRC 2 + Reed-Solomon 16 = 24 bytes.'],
-    ['guard_ms', 'Gap after a packet', 'ms', 'Slot = time on air + this gap (18.7 ms slots today).'],
+    ['overhead', 'Overhead in a packet', 'B', 'Sequence 2 + header 4 + CRC 2 + Reed-Solomon 16 = 24 bytes.'],
+    ['guard_ms', 'Gap after a packet', 'ms', 'Slot = time on air + this gap (17.54 ms slots today).'],
     ['fec_k', 'Block FEC: video packets', '', 'Video packets per block (only with parity packets).'],
     ['fec_m', 'Block FEC: parity packets', '', '0 = no block FEC (the transmitters send 4 per 8 video packets unless set otherwise).'],
     ['util', 'Video share of the link', '', '0 to 1.'],

@@ -1,5 +1,5 @@
-//! The H.265 decoder: win_decoder/decoder.c (identical to the browser's, web_decoder/) with unmodified FFmpeg, built
-//! as hz_decoder.dll (win_decoder/build_native.sh). The executable carries it (build.rs) and writes it out once to
+//! The H.265 decoder: decoder/decoder.c (shared with the browser's) with unmodified FFmpeg, built as hz_decoder.dll
+//! (decoder/native/build_native.sh). The executable carries it (build.rs) and writes it out once to
 //! %LOCALAPPDATA%\HorizonReceiver\decoder; a hz_decoder.dll next to the executable is used instead when present
 //! (a development build, or a user's own build of the library: FFmpeg is LGPL).
 use libloading::{Library, Symbol};
@@ -19,16 +19,27 @@ fn dll_path() -> Result<PathBuf, String> {
             return Ok(beside);
         }
         if EMBEDDED.is_empty() {
-            return Err(format!("no decoder: this build carries none and there is no {}", beside.display()));
+            return Err(format!(
+                "no decoder: this build carries none and there is no {}",
+                beside.display()
+            ));
         }
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
         let dir = base.join("HorizonReceiver").join("decoder");
         let path = dir.join(format!("hz_decoder-{}.dll", env!("HZ_DECODER_HASH")));
-        let ok = std::fs::metadata(&path).map(|m| m.len() == EMBEDDED.len() as u64).unwrap_or(false);
+        let ok = std::fs::metadata(&path)
+            .map(|m| m.len() == EMBEDDED.len() as u64)
+            .unwrap_or(false);
         if !ok {
             std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
             // a whole file or none: written beside, then renamed (another copy of the app may be starting too)
-            let tmp = dir.join(format!("hz_decoder-{}.{}.tmp", env!("HZ_DECODER_HASH"), std::process::id()));
+            let tmp = dir.join(format!(
+                "hz_decoder-{}.{}.tmp",
+                env!("HZ_DECODER_HASH"),
+                std::process::id()
+            ));
             std::fs::write(&tmp, EMBEDDED).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
             if std::fs::rename(&tmp, &path).is_err() {
                 let _ = std::fs::remove_file(&tmp);
@@ -38,7 +49,8 @@ fn dll_path() -> Result<PathBuf, String> {
             }
         }
         Ok(path)
-    }).clone()
+    })
+    .clone()
 }
 
 type New = unsafe extern "C" fn() -> *mut c_void;
@@ -72,7 +84,14 @@ impl Decoder {
             if handle.is_null() {
                 return Err("decoder_new failed".into());
             }
-            Ok(Decoder { _lib: lib, handle, free, send, receive, copy })
+            Ok(Decoder {
+                _lib: lib,
+                handle,
+                free,
+                send,
+                receive,
+                copy,
+            })
         }
     }
     /// One access unit (Annex-B). Then `picture()` for the newest decoded picture, if any.
@@ -117,14 +136,27 @@ impl Mux {
         let cpath = std::ffi::CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
         unsafe {
             let lib = Library::new(&dll).map_err(|e| format!("cannot load {}: {e}", dll.display()))?;
-            let open = *lib.get::<MuxOpen>(b"hz_mux_open").map_err(|_| "hz_decoder.dll without hz_mux_open: rebuild it (win_decoder/build_native.sh)".to_string())?;
+            let open = *lib.get::<MuxOpen>(b"hz_mux_open").map_err(|_| {
+                "hz_decoder.dll without hz_mux_open: rebuild it (decoder/native/build_native.sh)".to_string()
+            })?;
             let write = *lib.get::<MuxWrite>(b"hz_mux_write").map_err(|e| e.to_string())?;
             let close = *lib.get::<MuxClose>(b"hz_mux_close").map_err(|e| e.to_string())?;
-            let handle = open(cpath.as_ptr(), extradata.as_ptr(), extradata.len() as i32, width as i32, height as i32);
+            let handle = open(
+                cpath.as_ptr(),
+                extradata.as_ptr(),
+                extradata.len() as i32,
+                width as i32,
+                height as i32,
+            );
             if handle.is_null() {
                 return Err(format!("cannot write {}", path.display()));
             }
-            Ok(Mux { _lib: lib, handle, write, close })
+            Ok(Mux {
+                _lib: lib,
+                handle,
+                write,
+                close,
+            })
         }
     }
     pub fn write(&mut self, au: &[u8], time_us: i64, key: bool) -> bool {

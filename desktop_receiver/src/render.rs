@@ -1,24 +1,23 @@
-//! Low-latency presentation (as video_streaming's native_present.cpp): Direct3D 11, a flip-model swap chain on the
-//! app window with at most one frame queued (SetMaximumFrameLatency(1), paced by its waitable object), the newest
-//! picture drawn once as a letterboxed textured triangle and presented at once (tearing allowed where the system
-//! supports it, so a full-screen window flipped directly to the screen does not wait for the next refresh).
-//! DXGI's frame statistics tell when a presented picture actually reached the screen.
+//! Low-latency presentation: Direct3D 11, a flip-model swap chain with at most one frame queued
+//! (SetMaximumFrameLatency(1), paced by its waitable object), the newest picture presented at once (tearing allowed,
+//! so a full-screen window flipped directly to the screen does not wait for the next refresh).
 //!
-//! The bar (stats and buttons across the top) is drawn by Direct2D/DirectWrite into the same back buffer, above the
-//! video: to Windows it stays one full-screen picture, so it is still flipped straight to the screen. (A separate
-//! window beside the video, even without overlapping it, made every frame composed: 19.6 ms instead of 2.3 ms.)
+//! The bar is drawn by Direct2D into the same back buffer: a separate window beside the video, even without
+//! overlapping it, makes every frame composed (~20 ms instead of ~2 ms).
 use std::mem::ManuallyDrop;
 use windows::core::{s, w, Interface, BOOL, PCSTR};
+use windows::Win32::Foundation::{E_FAIL, HANDLE, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::DirectWrite::*;
-use windows::Win32::Foundation::{E_FAIL, HANDLE, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
-use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
-use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Direct3D::{
+    ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN,
+};
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -133,7 +132,19 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<Vec<u8>> {
     let mut blob: Option<ID3DBlob> = None;
     let mut err: Option<ID3DBlob> = None;
     unsafe {
-        D3DCompile(SHADER.as_ptr() as _, SHADER.len(), None, None, None, entry, target, 0, 0, &mut blob, Some(&mut err))?;
+        D3DCompile(
+            SHADER.as_ptr() as _,
+            SHADER.len(),
+            None,
+            None,
+            None,
+            entry,
+            target,
+            0,
+            0,
+            &mut blob,
+            Some(&mut err),
+        )?;
         let b = blob.unwrap();
         Ok(std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()).to_vec())
     }
@@ -151,8 +162,7 @@ impl Renderer {
     pub fn new(hwnd: HWND) -> windows::core::Result<Renderer> {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
-            // The GPU that drives the window's monitor: a picture drawn on another GPU (two-GPU machines) has to be
-            // copied across and is always composed, never flipped straight to the screen.
+            // The GPU that drives the window's monitor: a picture drawn on another GPU is always composed.
             let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             let mut adapter: Option<IDXGIAdapter1> = None;
             let mut i = 0;
@@ -168,7 +178,9 @@ impl Renderer {
                 i += 1;
             }
             let gpu = adapter.as_ref().and_then(|a| a.GetDesc1().ok()).map(|d| {
-                String::from_utf16_lossy(&d.Description).trim_end_matches('\0').to_string()
+                String::from_utf16_lossy(&d.Description)
+                    .trim_end_matches('\0')
+                    .to_string()
             });
             let mut device = None;
             let mut ctx = None;
@@ -176,17 +188,35 @@ impl Renderer {
                 Some(a) => (D3D_DRIVER_TYPE_UNKNOWN, Some(a.cast()?)),
                 None => (D3D_DRIVER_TYPE_HARDWARE, None),
             };
-            D3D11CreateDevice(adapter_arg.as_ref(), driver, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None,
-                D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut ctx))?;
+            D3D11CreateDevice(
+                adapter_arg.as_ref(),
+                driver,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut ctx),
+            )?;
             let device: ID3D11Device = device.unwrap();
             let ctx = ctx.unwrap();
             let mut allow = BOOL(0);
             let tearing = factory.cast::<IDXGIFactory5>().ok().is_some_and(|f| {
-                f.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allow as *mut _ as _, std::mem::size_of::<BOOL>() as u32).is_ok()
+                f.CheckFeatureSupport(
+                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                    &mut allow as *mut _ as _,
+                    std::mem::size_of::<BOOL>() as u32,
+                )
+                .is_ok()
                     && allow.as_bool()
             });
             let flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32
-                | if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32 } else { 0 };
+                | if tearing {
+                    DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32
+                } else {
+                    0
+                };
             let (w, h) = client(hwnd);
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: w,
@@ -217,15 +247,38 @@ impl Renderer {
             let psb = compile(s!("ps_lanczos"), s!("ps_5_0"))?;
             let mut ps = None;
             device.CreatePixelShader(&psb, None, Some(&mut ps))?;
-            let d2f: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&D2D1_FACTORY_OPTIONS::default()))?;
+            let d2f: ID2D1Factory1 = D2D1CreateFactory(
+                D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                Some(&D2D1_FACTORY_OPTIONS::default()),
+            )?;
             let d2dev = d2f.CreateDevice(&device.cast::<IDXGIDevice>()?)?;
             let dc = d2dev.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             dc.SetDpi(96.0, 96.0); // Direct2D units = pixels
             let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             let mut r = Renderer {
-                dc, dw, target: None, fonts: None, buttons: Vec::new(), shot: None, outline: None, notice: None, panel: 0.0, flip: 0,
-                hwnd, device, ctx, chain, waitable, rtv: None, vs, ps: ps.unwrap(),
-                tex: None, back: (w, h), flags, tearing, gpu: gpu.unwrap_or_else(|| "default GPU".into()),
+                dc,
+                dw,
+                target: None,
+                fonts: None,
+                buttons: Vec::new(),
+                shot: None,
+                outline: None,
+                notice: None,
+                panel: 0.0,
+                flip: 0,
+                hwnd,
+                device,
+                ctx,
+                chain,
+                waitable,
+                rtv: None,
+                vs,
+                ps: ps.unwrap(),
+                tex: None,
+                back: (w, h),
+                flags,
+                tearing,
+                gpu: gpu.unwrap_or_else(|| "default GPU".into()),
             };
             r.make_rtv()?;
             Ok(r)
@@ -281,7 +334,10 @@ impl Renderer {
             self.rtv = rtv;
             let surface: IDXGISurface = self.chain.GetBuffer(0)?;
             let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
                 dpiX: 96.0,
                 dpiY: 96.0,
                 bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
@@ -309,7 +365,8 @@ impl Renderer {
                 self.dc.SetTarget(None);
                 self.target = None;
                 self.ctx.ClearState();
-                self.chain.ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(self.flags as i32))?;
+                self.chain
+                    .ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(self.flags as i32))?;
                 self.back = (cw, ch);
                 self.make_rtv()?;
             }
@@ -338,10 +395,20 @@ impl Renderer {
             }
             let rtv = self.rtv.clone();
             self.ctx.OMSetRenderTargets(Some(&[rtv.clone()]), None);
-            self.ctx.ClearRenderTargetView(rtv.as_ref().unwrap(), &[0.0, 0.0, 0.0, 1.0]);
-            let bar_h = if bar.is_some() { (self.back.1 as f32 * BAR_SHARE).round() } else { 0.0 };
+            self.ctx
+                .ClearRenderTargetView(rtv.as_ref().unwrap(), &[0.0, 0.0, 0.0, 1.0]);
+            let bar_h = if bar.is_some() {
+                (self.back.1 as f32 * BAR_SHARE).round()
+            } else {
+                0.0
+            };
             // where the video goes (the whole area under the bar until the first picture)
-            let mut video = D2D_RECT_F { left: self.panel, top: bar_h, right: self.back.0 as f32, bottom: self.back.1 as f32 };
+            let mut video = D2D_RECT_F {
+                left: self.panel,
+                top: bar_h,
+                right: self.back.0 as f32,
+                bottom: self.back.1 as f32,
+            };
             if let Some((_, view, w, h)) = &self.tex {
                 let (bw, bh) = ((self.back.0 as f32 - self.panel).max(1.0), self.back.1 as f32 - bar_h);
                 let s = (bw / *w as f32).min(bh / *h as f32);
@@ -353,7 +420,12 @@ impl Renderer {
                     MinDepth: 0.0,
                     MaxDepth: 1.0,
                 };
-                video = D2D_RECT_F { left: vp.TopLeftX, top: vp.TopLeftY, right: vp.TopLeftX + vp.Width, bottom: vp.TopLeftY + vp.Height };
+                video = D2D_RECT_F {
+                    left: vp.TopLeftX,
+                    top: vp.TopLeftY,
+                    right: vp.TopLeftX + vp.Width,
+                    bottom: vp.TopLeftY + vp.Height,
+                };
                 self.ctx.RSSetViewports(Some(&[vp]));
                 self.ctx.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 self.ctx.VSSetShader(&self.vs[(self.flip & 3) as usize], None);
@@ -372,7 +444,11 @@ impl Renderer {
             } else {
                 self.buttons.clear();
             }
-            let flags = if self.tearing { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) };
+            let flags = if self.tearing {
+                DXGI_PRESENT_ALLOW_TEARING
+            } else {
+                DXGI_PRESENT(0)
+            };
             if let Some(path) = self.shot.take() {
                 if let Err(e) = self.save_bmp(&path) {
                     eprintln!("ERROR shot {}: {e}", path.display());
@@ -385,18 +461,26 @@ impl Renderer {
 
     fn fonts(&mut self, h: u32) -> windows::core::Result<&Fonts> {
         if self.fonts.as_ref().map(|f| f.height) != Some(h) {
-            let make = |size: f32, weight: DWRITE_FONT_WEIGHT, centre: bool| -> windows::core::Result<IDWriteTextFormat> {
-                unsafe {
-                    let f = self.dw.CreateTextFormat(w!("Segoe UI"), None, weight, DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL, size.max(8.0), w!("en-us"))?;
-                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                    f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                    if centre {
-                        f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            let make =
+                |size: f32, weight: DWRITE_FONT_WEIGHT, centre: bool| -> windows::core::Result<IDWriteTextFormat> {
+                    unsafe {
+                        let f = self.dw.CreateTextFormat(
+                            w!("Segoe UI"),
+                            None,
+                            weight,
+                            DWRITE_FONT_STYLE_NORMAL,
+                            DWRITE_FONT_STRETCH_NORMAL,
+                            size.max(8.0),
+                            w!("en-us"),
+                        )?;
+                        f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                        f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                        if centre {
+                            f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                        }
+                        Ok(f)
                     }
-                    Ok(f)
-                }
-            };
+                };
             let hf = h as f32;
             self.fonts = Some(Fonts {
                 height: h,
@@ -413,7 +497,9 @@ impl Renderer {
     /// Width of `text` in `format`, in pixels.
     fn text_width(&self, text: &[u16], format: &IDWriteTextFormat) -> f32 {
         unsafe {
-            let Ok(layout) = self.dw.CreateTextLayout(text, format, 100000.0, 1000.0) else { return 0.0 };
+            let Ok(layout) = self.dw.CreateTextLayout(text, format, 100000.0, 1000.0) else {
+                return 0.0;
+            };
             let mut m = DWRITE_TEXT_METRICS::default();
             if layout.GetMetrics(&mut m).is_err() {
                 return 0.0;
@@ -422,20 +508,31 @@ impl Renderer {
         }
     }
 
-    /// The bar across the top `h` pixels: brand and stats (or the replay's controls) on the first line with the buttons
-    /// on the right, the detail line below, and while replaying a progress strip along the bottom edge. Sizes follow
-    /// the bar height, so it reads the same on any screen.
-    /// The link warning: a frame inside the edge of the video (so it covers no bar and no panel), thick enough to be seen
-    /// from the corner of the eye.
+    /// The link warning: a frame inside the edge of the video (so it covers no bar and no panel).
     fn draw_outline(&mut self, r: D2D_RECT_F, c: [f32; 3]) -> windows::core::Result<()> {
-        let Some(target) = self.target.clone() else { return Ok(()) };
+        let Some(target) = self.target.clone() else {
+            return Ok(());
+        };
         let t = ((r.bottom - r.top) * 0.012).max(6.0);
         unsafe {
             let dc = self.dc.clone();
             dc.SetTarget(&target);
             dc.BeginDraw();
-            let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: c[0], g: c[1], b: c[2], a: 1.0 }, None)?;
-            let inner = D2D_RECT_F { left: r.left + t / 2.0, top: r.top + t / 2.0, right: r.right - t / 2.0, bottom: r.bottom - t / 2.0 };
+            let brush = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
+                    a: 1.0,
+                },
+                None,
+            )?;
+            let inner = D2D_RECT_F {
+                left: r.left + t / 2.0,
+                top: r.top + t / 2.0,
+                right: r.right - t / 2.0,
+                bottom: r.bottom - t / 2.0,
+            };
             dc.DrawRectangle(&inner, &brush, t, None);
             dc.EndDraw(None, None)?;
             dc.SetTarget(None);
@@ -446,15 +543,24 @@ impl Renderer {
     /// "Why is there no picture?": a dark box in the middle of the video (over the last picture), the title in the warning
     /// colour and the explanation below, wrapped. Sized from the video's height, so it reads the same on any screen.
     fn draw_notice(&mut self, r: D2D_RECT_F, title: &str, text: &str) -> windows::core::Result<()> {
-        let Some(target) = self.target.clone() else { return Ok(()) };
+        let Some(target) = self.target.clone() else {
+            return Ok(());
+        };
         let (vw, vh) = (r.right - r.left, r.bottom - r.top);
         let box_w = (vw * 0.62).max(vh * 0.9).min(vw - 16.0).max(1.0);
         let pad = (vh * 0.035).max(12.0);
         let u = |t: &str| -> Vec<u16> { t.encode_utf16().collect() };
         unsafe {
             let fmt = |size: f32, weight: DWRITE_FONT_WEIGHT| -> windows::core::Result<IDWriteTextFormat> {
-                let f = self.dw.CreateTextFormat(w!("Segoe UI"), None, weight, DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL, size.max(11.0), w!("en-us"))?;
+                let f = self.dw.CreateTextFormat(
+                    w!("Segoe UI"),
+                    None,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size.max(11.0),
+                    w!("en-us"),
+                )?;
                 f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
                 f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
                 Ok(f)
@@ -477,14 +583,59 @@ impl Renderer {
             let dc = self.dc.clone();
             dc.SetTarget(&target);
             dc.BeginDraw();
-            let bg = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.047, g: 0.086, b: 0.125, a: 0.86 }, None)?; // #0C1620
-            let edge = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.949, g: 0.722, b: 0.294, a: 1.0 }, None)?; // #F2B84B
-            let ink = dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.969, g: 0.976, b: 0.973, a: 1.0 }, None)?;
-            let rect = D2D_RECT_F { left, top, right: left + box_w, bottom: top + box_h };
+            let bg = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.047,
+                    g: 0.086,
+                    b: 0.125,
+                    a: 0.86,
+                },
+                None,
+            )?; // #0C1620
+            let edge = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.949,
+                    g: 0.722,
+                    b: 0.294,
+                    a: 1.0,
+                },
+                None,
+            )?; // #F2B84B
+            let ink = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.969,
+                    g: 0.976,
+                    b: 0.973,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            let rect = D2D_RECT_F {
+                left,
+                top,
+                right: left + box_w,
+                bottom: top + box_h,
+            };
             dc.FillRectangle(&rect, &bg);
             dc.DrawRectangle(&rect, &edge, (vh * 0.004).max(2.0), None);
-            dc.DrawTextLayout(windows_numerics::Vector2 { X: left + pad, Y: top + pad }, &tl, &edge, D2D1_DRAW_TEXT_OPTIONS_NONE);
-            dc.DrawTextLayout(windows_numerics::Vector2 { X: left + pad, Y: top + pad + th + gap }, &bl, &ink, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            dc.DrawTextLayout(
+                windows_numerics::Vector2 {
+                    X: left + pad,
+                    Y: top + pad,
+                },
+                &tl,
+                &edge,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            dc.DrawTextLayout(
+                windows_numerics::Vector2 {
+                    X: left + pad,
+                    Y: top + pad + th + gap,
+                },
+                &bl,
+                &ink,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
             dc.EndDraw(None, None)?;
             dc.SetTarget(None);
         }
@@ -492,13 +643,26 @@ impl Renderer {
     }
 
     fn draw_bar(&mut self, bar: &Bar, h: f32) -> windows::core::Result<()> {
-        let Some(target) = self.target.clone() else { return Ok(()) };
+        let Some(target) = self.target.clone() else {
+            return Ok(());
+        };
         let width = self.back.0 as f32;
         self.fonts(h as u32)?;
         let f = self.fonts.as_ref().unwrap();
-        let (brand, label, value, small, button) = (f.brand.clone(), f.label.clone(), f.value.clone(), f.small.clone(), f.button.clone());
+        let (brand, label, value, small, button) = (
+            f.brand.clone(),
+            f.label.clone(),
+            f.value.clone(),
+            f.small.clone(),
+            f.button.clone(),
+        );
         let u = |t: &str| -> Vec<u16> { t.encode_utf16().collect() };
-        let rect = |l: f32, t: f32, r: f32, b: f32| RECT { left: l as i32, top: t as i32, right: r as i32, bottom: b as i32 };
+        let rect = |l: f32, t: f32, r: f32, b: f32| RECT {
+            left: l as i32,
+            top: t as i32,
+            right: r as i32,
+            bottom: b as i32,
+        };
         unsafe {
             let dc = self.dc.clone();
             dc.SetTarget(&target);
@@ -517,21 +681,50 @@ impl Renderer {
             let rec_bg = dc.CreateSolidColorBrush(&col(0.227, 0.098, 0.082), None)?; // #3A1915
             let btn_bg = dc.CreateSolidColorBrush(&col(0.082, 0.153, 0.2), None)?; // #152733
             let btn_edge = dc.CreateSolidColorBrush(&col(0.165, 0.247, 0.302), None)?; // #2A3F4D
-            dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: width, bottom: h }, &bg);
+            dc.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: width,
+                    bottom: h,
+                },
+                &bg,
+            );
             let pad = h * 0.16;
             let (r1t, r1b) = (h * 0.12, h * 0.56); // first line
             let (r2t, r2b) = (h * 0.58, h * 0.86); // detail line
-            let text = |t: &[u16], fmt: &IDWriteTextFormat, x: f32, top: f32, bottom: f32, brush: &ID2D1SolidColorBrush| {
-                dc.DrawText(t, fmt, &D2D_RECT_F { left: x, top, right: x + 100000.0, bottom }, brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            };
+            let text =
+                |t: &[u16], fmt: &IDWriteTextFormat, x: f32, top: f32, bottom: f32, brush: &ID2D1SolidColorBrush| {
+                    dc.DrawText(
+                        t,
+                        fmt,
+                        &D2D_RECT_F {
+                            left: x,
+                            top,
+                            right: x + 100000.0,
+                            bottom,
+                        },
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                };
             // a button: (fill, edge, text) styles by kind: 0 plain, 1 primary (accent), 2 recording (red)
             let mut buttons: Vec<(u32, RECT)> = Vec::new();
             let mut draw_button = |id: u32, name: &str, x_right: f32, kind: u8, me: &Self| -> f32 {
                 let t = u(name);
                 let bw = me.text_width(&t, &button) + h * 0.26;
-                let r = D2D_RECT_F { left: x_right - bw, top: r1t + h * 0.03, right: x_right, bottom: r1b - h * 0.03 };
-                let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: h * 0.04, radiusY: h * 0.04 };
+                let r = D2D_RECT_F {
+                    left: x_right - bw,
+                    top: r1t + h * 0.03,
+                    right: x_right,
+                    bottom: r1b - h * 0.03,
+                };
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: r,
+                    radiusX: h * 0.04,
+                    radiusY: h * 0.04,
+                };
                 let (fill, edge, fg) = match kind {
                     1 => (&accent, &accent, &ink),
                     2 => (&rec_bg, &rec, &rec),
@@ -540,7 +733,14 @@ impl Renderer {
                 };
                 dc.FillRoundedRectangle(&rr, fill);
                 dc.DrawRoundedRectangle(&rr, edge, 1.0, None);
-                dc.DrawText(&t, &button, &r, fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                dc.DrawText(
+                    &t,
+                    &button,
+                    &r,
+                    fg,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
                 buttons.push((id, rect(r.left, r.top, r.right, r.bottom)));
                 r.left - h * 0.08
             };
@@ -550,11 +750,23 @@ impl Renderer {
             text(&t, &brand, x, r1t, r1b, &yellow_of(&dc)?);
             x += self.text_width(&t, &brand) + h * 0.28;
             if let Some(rp) = &bar.replay {
-                // ---- replaying a session
+                // replaying a session
                 let chip = u("REPLAY");
                 let cw = self.text_width(&chip, &label) + h * 0.18;
-                let cr = D2D_RECT_F { left: x, top: r1t + h * 0.09, right: x + cw, bottom: r1b - h * 0.09 };
-                dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: cr, radiusX: h * 0.03, radiusY: h * 0.03 }, &accent_soft);
+                let cr = D2D_RECT_F {
+                    left: x,
+                    top: r1t + h * 0.09,
+                    right: x + cw,
+                    bottom: r1b - h * 0.09,
+                };
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: cr,
+                        radiusX: h * 0.03,
+                        radiusY: h * 0.03,
+                    },
+                    &accent_soft,
+                );
                 text(&chip, &label, x + h * 0.09, r1t, r1b, &accent);
                 x += cw + h * 0.16;
                 let tt = u(&rp.title);
@@ -562,7 +774,12 @@ impl Renderer {
                 x += self.text_width(&tt, &value) + h * 0.24;
                 // transport, left to right: back, play/pause, forward, speed, then the time
                 let mut xr = x;
-                for (id, name, kind) in [(BTN_BACK, "−10 s", 0u8), (BTN_PLAY, if rp.playing { "Pause" } else { "Play" }, 1), (BTN_FWD, "+10 s", 0), (BTN_SPEED, rp.speed.as_str(), 0)] {
+                for (id, name, kind) in [
+                    (BTN_BACK, "−10 s", 0u8),
+                    (BTN_PLAY, if rp.playing { "Pause" } else { "Play" }, 1),
+                    (BTN_FWD, "+10 s", 0),
+                    (BTN_SPEED, rp.speed.as_str(), 0),
+                ] {
                     let t = u(name);
                     let bw = self.text_width(&t, &button) + h * 0.26;
                     let next = draw_button(id, name, xr + bw, kind, self);
@@ -580,15 +797,39 @@ impl Renderer {
                 text(&u(&bar.detail), &small, pad, r2t, r2b, &grey);
                 // progress strip along the bottom edge, with the problems marked
                 let (st, sb) = (h - h * 0.05, h);
-                dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: st, right: width, bottom: sb }, &btn_bg);
-                dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: st, right: width * rp.progress.clamp(0.0, 1.0) as f32, bottom: sb }, &accent);
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: st,
+                        right: width,
+                        bottom: sb,
+                    },
+                    &btn_bg,
+                );
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: st,
+                        right: width * rp.progress.clamp(0.0, 1.0) as f32,
+                        bottom: sb,
+                    },
+                    &accent,
+                );
                 for m in &rp.marks {
                     let mx = width * (*m as f32);
-                    dc.FillRectangle(&D2D_RECT_F { left: mx - 1.5, top: st - h * 0.04, right: mx + 1.5, bottom: sb }, &warn);
+                    dc.FillRectangle(
+                        &D2D_RECT_F {
+                            left: mx - 1.5,
+                            top: st - h * 0.04,
+                            right: mx + 1.5,
+                            bottom: sb,
+                        },
+                        &warn,
+                    );
                 }
                 buttons.push((BTN_SEEK, rect(0.0, h - h * 0.12, width, h)));
             } else {
-                // ---- live
+                // live
                 for (l, v) in &bar.stats {
                     let (lt, vt) = (u(&l.to_uppercase()), u(v));
                     text(&lt, &label, x, r1t, r1b, &muted);
@@ -599,19 +840,55 @@ impl Renderer {
                 if let Some(r) = &bar.rec {
                     let rt = u(r);
                     let rw = self.text_width(&rt, &label) + h * 0.36;
-                    let cr = D2D_RECT_F { left: x, top: r1t + h * 0.09, right: x + rw, bottom: r1b - h * 0.09 };
-                    dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: cr, radiusX: h * 0.03, radiusY: h * 0.03 }, &rec_bg);
+                    let cr = D2D_RECT_F {
+                        left: x,
+                        top: r1t + h * 0.09,
+                        right: x + rw,
+                        bottom: r1b - h * 0.09,
+                    };
+                    dc.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: cr,
+                            radiusX: h * 0.03,
+                            radiusY: h * 0.03,
+                        },
+                        &rec_bg,
+                    );
                     let cy = (r1t + r1b) / 2.0;
-                    dc.FillEllipse(&D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: x + h * 0.11, Y: cy }, radiusX: h * 0.045, radiusY: h * 0.045 }, &rec);
+                    dc.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: x + h * 0.11, Y: cy },
+                            radiusX: h * 0.045,
+                            radiusY: h * 0.045,
+                        },
+                        &rec,
+                    );
                     text(&rt, &label, x + h * 0.2, r1t, r1b, &rec);
                 }
                 let mut right = width - pad;
-                for (id, name, kind) in [(BTN_QUIT, "Quit (Q)", 0u8), (BTN_VIDEO, "Video only (H)", 0), (BTN_SETTINGS, "Settings (S)", 0)] {
+                for (id, name, kind) in [
+                    (BTN_QUIT, "Quit (Q)", 0u8),
+                    (BTN_VIDEO, "Video only (H)", 0),
+                    (BTN_SETTINGS, "Settings (S)", 0),
+                ] {
                     right = draw_button(id, name, right, kind, self);
                 }
                 let recording = bar.rec.is_some();
-                draw_button(BTN_REC, if recording { "Stop recording (R)" } else { "Record (R)" }, right, if recording { 2 } else { 0 }, self);
-                text(&u(&bar.detail), &small, pad, r2t, r2b, if bar.warn { &warn } else { &grey });
+                draw_button(
+                    BTN_REC,
+                    if recording { "Stop recording (R)" } else { "Record (R)" },
+                    right,
+                    if recording { 2 } else { 0 },
+                    self,
+                );
+                text(
+                    &u(&bar.detail),
+                    &small,
+                    pad,
+                    r2t,
+                    r2b,
+                    if bar.warn { &warn } else { &grey },
+                );
             }
             dc.EndDraw(None, None)?;
             dc.SetTarget(None);
@@ -623,7 +900,9 @@ impl Renderer {
     /// How the last frames reached the screen: "composed" (by the desktop window manager: a refresh or two
     /// later), "overlay" or "direct" (independent flip: no composition step).
     pub fn mode(&self) -> &'static str {
-        let Ok(m) = self.chain.cast::<IDXGISwapChainMedia>() else { return "unknown" };
+        let Ok(m) = self.chain.cast::<IDXGISwapChainMedia>() else {
+            return "unknown";
+        };
         let mut st = DXGI_FRAME_STATISTICS_MEDIA::default();
         if unsafe { m.GetFrameStatisticsMedia(&mut st) }.is_err() {
             return "unknown";
@@ -640,15 +919,19 @@ impl Renderer {
     pub fn back(&self) -> (u32, u32) {
         self.back
     }
-
-    /// (present count, QPC time of the refresh it was shown at) of the latest picture on the screen, if known.
-    pub fn shown(&self) -> Option<(u32, i64)> {
-        let mut st = DXGI_FRAME_STATISTICS::default();
-        unsafe { self.chain.GetFrameStatistics(&mut st).ok().map(|_| (st.PresentCount, st.SyncQPCTime)) }
-    }
 }
 
 /// The Horizon star's yellow (#FDF100), for the brand name.
 fn yellow_of(dc: &ID2D1DeviceContext) -> windows::core::Result<ID2D1SolidColorBrush> {
-    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.992, g: 0.945, b: 0.0, a: 1.0 }, None) }
+    unsafe {
+        dc.CreateSolidColorBrush(
+            &D2D1_COLOR_F {
+                r: 0.992,
+                g: 0.945,
+                b: 0.0,
+                a: 1.0,
+            },
+            None,
+        )
+    }
 }

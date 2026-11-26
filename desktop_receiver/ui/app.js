@@ -23,7 +23,6 @@ let flightDir = null;
 let sel = null;              // [t0, t1] selection on the timeline
 let tickAt = 0;              // performance.now() of the last tick, for the replay cursor between ticks
 
-// ---- small helpers
 const fmtNum = (v, d = 0) => (v == null || !isFinite(v)) ? '–' : v.toFixed(d).replace('-', '−');
 const mmss = (s) => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60;
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`; };
@@ -121,9 +120,8 @@ window.addEventListener('resize', () => redraw());
 function current() { return pages.find((q) => !$('page-' + q).hidden); }
 function redraw() { const p = current(); if (p === 'live') drawLive(); if (p === 'flight') drawFlight(); if (p === 'budget') drawBudget(); }
 
-// ---- the graph checklist (like the main branch's tick list): which statistics are graphed, per page
+// ---- the graph checklist: which statistics are graphed, per page
 let graphsFor = null;
-// Graphs… opens the checklist and, clicked again, closes it
 document.querySelectorAll('[data-graphs]').forEach((b) => b.addEventListener('click', () => {
   if (!$('graphs-pop').hidden && graphsFor === b.dataset.graphs) $('graphs-pop').hidden = true;
   else openGraphs(b.dataset.graphs);

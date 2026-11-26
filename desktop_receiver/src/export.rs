@@ -32,7 +32,11 @@ fn nal_types(au: &[u8]) -> Vec<(u8, usize, usize)> {
     }
     let mut out = Vec::new();
     for (k, &s) in starts.iter().enumerate() {
-        let mut end = if k + 1 < starts.len() { starts[k + 1] - 3 } else { au.len() };
+        let mut end = if k + 1 < starts.len() {
+            starts[k + 1] - 3
+        } else {
+            au.len()
+        };
         while end > s && au[end - 1] == 0 {
             end -= 1;
         }
@@ -54,7 +58,11 @@ fn parameter_sets(au: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(&au[s..e]);
         }
     }
-    if have.iter().all(|h| *h) { Some(out) } else { None }
+    if have.iter().all(|h| *h) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn is_key(au: &[u8]) -> bool {
@@ -82,7 +90,9 @@ pub fn export(dir: &Path, from: f64, to: f64, out: &Path, progress: &mut dyn FnM
     let mut written = 0u64;
     for line in reader.lines() {
         let line = line.map_err(|e| e.to_string())?;
-        let Some((t, text)) = session::line_time(&line) else { continue };
+        let Some((t, text)) = session::line_time(&line) else {
+            continue;
+        };
         if t > to {
             break;
         }
@@ -91,7 +101,9 @@ pub fn export(dir: &Path, from: f64, to: f64, out: &Path, progress: &mut dyn FnM
             if t < from - LEAD_S {
                 continue;
             }
-            let Some((data, sent)) = engine::prepare_au(&au) else { continue };
+            let Some((data, sent)) = engine::prepare_au(&au) else {
+                continue;
+            };
             let time_us = sent.map(|s| s as i64).unwrap_or((t * 1e6) as i64);
             if extradata.is_none() {
                 extradata = parameter_sets(&data);
@@ -138,9 +150,14 @@ mod tests {
     #[test]
     fn finds_parameter_sets() {
         // VPS (32), SPS (33), PPS (34), then a slice (1)
-        let au = [0u8, 0, 0, 1, 64, 1, 9, 0, 0, 1, 66, 1, 8, 0, 0, 1, 68, 1, 7, 0, 0, 1, 2, 1, 5];
+        let au = [
+            0u8, 0, 0, 1, 64, 1, 9, 0, 0, 1, 66, 1, 8, 0, 0, 1, 68, 1, 7, 0, 0, 1, 2, 1, 5,
+        ];
         let ps = parameter_sets(&au).unwrap();
-        assert_eq!(ps, vec![0, 0, 0, 1, 64, 1, 9, 0, 0, 0, 1, 66, 1, 8, 0, 0, 0, 1, 68, 1, 7]);
+        assert_eq!(
+            ps,
+            vec![0, 0, 0, 1, 64, 1, 9, 0, 0, 0, 1, 66, 1, 8, 0, 0, 0, 1, 68, 1, 7]
+        );
         assert!(!is_key(&au));
     }
 }

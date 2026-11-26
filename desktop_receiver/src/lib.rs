@@ -6,22 +6,20 @@
 //!   decode   decodes every access unit of the source shown (live or the replay), keeps the newest picture
 //!   render   presents the newest picture as soon as it is decoded (render.rs: flip model, one frame queued)
 //!   stats    samples the statistics twice a second: history, stats.csv, the bar, the Settings window
-//! The video window is the app: one full-screen swap chain with the bar (stats, buttons) drawn into its top 10 % and
-//! the video below. To Windows it is one full-screen picture, flipped straight to the screen (PresentMon: 2.65 ms from
-//! the last packet to the display). The Settings window is a separate window, opened on demand (S): over the video it
-//! makes it composed while it is open, which is fine for settings.
-pub mod engine;
-pub mod session;
-pub mod stats;
-pub mod replay;
+//! The video window is the app: one full-screen swap chain with the bar drawn into its top 10 % and the video below,
+//! so Windows flips it straight to the screen. The Settings window is separate: a web view is always composed.
 #[cfg(windows)]
 pub mod decoder;
-pub mod hold;
 pub mod diag;
+pub mod engine;
 #[cfg(windows)]
 mod export;
+pub mod hold;
 #[cfg(windows)]
 mod render;
+pub mod replay;
+pub mod session;
+pub mod stats;
 
 #[cfg(windows)]
 pub use app::run;
@@ -44,7 +42,10 @@ mod app {
     use tauri::{Emitter, Manager, WebviewWindow};
     use windows::core::w;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, GetStockObject, MonitorFromPoint, MonitorFromWindow, BLACK_BRUSH, HBRUSH, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, GetStockObject, MonitorFromPoint, MonitorFromWindow, BLACK_BRUSH, HBRUSH, HMONITOR,
+        MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -74,10 +75,13 @@ mod app {
     }
     fn mmss(s: f64) -> String {
         let s = s.max(0.0) as u64;
-        if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{:02}:{:02}", s / 60, s % 60) }
+        if s >= 3600 {
+            format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+        } else {
+            format!("{:02}:{:02}", s / 60, s % 60)
+        }
     }
 
-    // ---- shared state
     #[derive(Clone, Default, Serialize)]
     struct Cfg {
         freq_hz: u64,
@@ -97,14 +101,13 @@ mod app {
         status: String,
         lost: u64,
         repaired: u64,
-        /// video packets rebuilt by the block FEC (not in stats.csv: the Python receiver has no such column)
+        /// video packets rebuilt by the block FEC (not in stats.csv)
         fec_recovered: u64,
         /// what is wrong with the Grounds plugged in: one that does not open, firmware not up to date
         problems: Vec<String>,
         /// the receiving Ground's own firmware problem (from its W reply)
         fw_problem: Option<String>,
-        /// for "why is there no picture?" (diag.rs): the newest packet of any kind, the newest video packet, the
-        /// newest Air status (unix seconds, 0 = none)
+        /// for diag.rs: the newest packet of any kind, video packet, Air status (unix seconds, 0 = none)
         last_heard: f64,
         /// when packets started arriving after a gap of a second or more (diag.rs: no notice while the link comes up)
         link_since: f64,
@@ -177,8 +180,7 @@ mod app {
     #[derive(Clone, Serialize, serde::Deserialize)]
     #[serde(default)]
     struct Prefs {
-        /// the camera's mounting: 0 as it sends the picture, 3 rotated 180° (the renderer's bits: mirror left-right and
-        /// upside down). Only these two: a mirrored picture is never right for a camera.
+        /// 0 as the camera sends it, 3 rotated 180° (the renderer's mirror bits). Never mirrored: never right for a camera.
         flip: u8,
         out_dir: Option<String>,
         /// the middle of the monitor the video was last on (desktop coordinates): it starts there again
@@ -186,18 +188,31 @@ mod app {
     }
     impl Default for Prefs {
         fn default() -> Self {
-            Prefs { flip: 0, out_dir: None, monitor: None }
+            Prefs {
+                flip: 0,
+                out_dir: None,
+                monitor: None,
+            }
         }
     }
     static PREFS: Mutex<Option<Prefs>> = Mutex::new(None);
     fn prefs_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("HorizonReceiver").join("settings.json")
+        std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default())
+            .join("HorizonReceiver")
+            .join("settings.json")
     }
     fn prefs() -> Prefs {
         let mut g = PREFS.lock().unwrap();
-        let mut p = g.get_or_insert_with(|| std::fs::read(prefs_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()).clone();
+        let mut p = g
+            .get_or_insert_with(|| {
+                std::fs::read(prefs_path())
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default()
+            })
+            .clone();
         if p.flip != 3 {
-            p.flip = 0; // an earlier mirror setting: as the camera sends it
+            p.flip = 0;
         }
         p
     }
@@ -218,7 +233,7 @@ mod app {
     static WINDOW: OnceLock<WebviewWindow> = OnceLock::new();
     static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
     /// --frame-log FILE: one CSV line per presented picture with QPC times (last packet received, decoded, Present
-    /// called, Present returned), to pair with PresentMon's display times (measure_latency.cmd)
+    /// called, Present returned), to pair with PresentMon's display times (test/measure_latency.cmd)
     static FRAME_LOG: OnceLock<String> = OnceLock::new();
     /// --shot FILE [--shot-after SECONDS]: run without showing anything (a hidden 1920x1080 window), save the frame
     /// (video and bar) as a BMP after that long (default 6 s), and exit. For testing without taking over the screen.
@@ -227,7 +242,6 @@ mod app {
         SHARED.get().expect("shared state")
     }
 
-    // ---- the Ground
     struct Sink {
         aus: Vec<(Vec<u8>, bool)>,
         lost: u64,
@@ -251,38 +265,64 @@ mod app {
         }
     }
 
-    /// The USB product name of each serial port ("COM8" -> "Horizon Dev Ground rev-1A"), as the board reports it.
-    /// serialport only gives Windows' generic "USB Serial Device (COM8)"; the board's own name is the device property
-    /// "bus reported device description".
+    /// The USB product name of each serial port ("COM8" -> "Horizon HAT receiver"): serialport only gives Windows'
+    /// generic name; the board's own is the device property "bus reported device description".
     fn usb_products() -> std::collections::HashMap<String, String> {
         use windows::Win32::Devices::DeviceAndDriverInstallation::*;
         use windows::Win32::Devices::Properties::{DEVPKEY_Device_BusReportedDeviceDesc, DEVPROPTYPE};
         let mut out = std::collections::HashMap::new();
         let wide = |b: &[u8]| {
-            let w: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+            let w: Vec<u16> = b
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&c| c != 0)
+                .collect();
             String::from_utf16_lossy(&w)
         };
         unsafe {
-            let Ok(set) = SetupDiGetClassDevsW(Some(&GUID_DEVCLASS_PORTS), windows::core::PCWSTR::null(), None, DIGCF_PRESENT) else {
+            let Ok(set) = SetupDiGetClassDevsW(
+                Some(&GUID_DEVCLASS_PORTS),
+                windows::core::PCWSTR::null(),
+                None,
+                DIGCF_PRESENT,
+            ) else {
                 return out;
             };
             for i in 0.. {
-                let mut dev = SP_DEVINFO_DATA { cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
+                let mut dev = SP_DEVINFO_DATA {
+                    cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+                    ..Default::default()
+                };
                 if SetupDiEnumDeviceInfo(set, i, &mut dev).is_err() {
                     break;
                 }
                 let mut buf = [0u8; 512];
                 // "USB Serial Device (COM8)" -> COM8
-                if SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_FRIENDLYNAME, None, Some(&mut buf), None).is_err() {
+                if SetupDiGetDeviceRegistryPropertyW(set, &dev, SPDRP_FRIENDLYNAME, None, Some(&mut buf), None).is_err()
+                {
                     continue;
                 }
                 let friendly = wide(&buf);
-                let Some(port) = friendly.rsplit_once('(').and_then(|(_, r)| r.strip_suffix(')')).filter(|p| p.starts_with("COM")) else {
+                let Some(port) = friendly
+                    .rsplit_once('(')
+                    .and_then(|(_, r)| r.strip_suffix(')'))
+                    .filter(|p| p.starts_with("COM"))
+                else {
                     continue;
                 };
                 let mut ty = DEVPROPTYPE::default();
                 let mut buf = [0u8; 512];
-                if SetupDiGetDevicePropertyW(set, &dev, &DEVPKEY_Device_BusReportedDeviceDesc, &mut ty, Some(&mut buf), None, 0).is_ok() {
+                if SetupDiGetDevicePropertyW(
+                    set,
+                    &dev,
+                    &DEVPKEY_Device_BusReportedDeviceDesc,
+                    &mut ty,
+                    Some(&mut buf),
+                    None,
+                    0,
+                )
+                .is_ok()
+                {
                     out.insert(port.to_string(), wide(&buf));
                 }
             }
@@ -291,7 +331,7 @@ mod app {
         out
     }
 
-    /// Our boards that are not receivers, by USB product name (lora_vlink/CMakeLists.txt HZ_USB_PRODUCT_*): the Pi
+    /// Our boards that are not receivers, by USB product name (radio_firmware/CMakeLists.txt HZ_USB_PRODUCT_*): the Pi
     /// transmitter's and the Air unit's radios.
     fn is_transmitter(product: &str) -> bool {
         product.contains("transmitter") || product.contains("Air radio")
@@ -309,7 +349,7 @@ mod app {
                     if product.as_deref().is_some_and(is_transmitter) {
                         return None;
                     }
-                    let name = product.unwrap_or_else(|| "Horizon Dev Ground".into());
+                    let name = product.unwrap_or_else(|| "Ground".into());
                     let label = format!("{} {}", name, u.serial_number.unwrap_or_default());
                     Some((p.port_name, label.trim().to_string()))
                 }
@@ -321,7 +361,15 @@ mod app {
     /// Counts one parsed line into the statistics. `t`: unix time.
     fn count(live: &mut Live, what: &Line, t: f64) {
         match what {
-            Line::Packet { ok: true, filler, repaired, video, radio, air, .. } => {
+            Line::Packet {
+                ok: true,
+                filler,
+                repaired,
+                video,
+                radio,
+                air,
+                ..
+            } => {
                 if t - live.last_heard >= 1.0 {
                     live.link_since = t;
                 }
@@ -352,8 +400,18 @@ mod app {
                 live.stats.missed(t, true)
             }
             Line::Miss { .. } => live.stats.missed(t, false),
-            Line::Cfg { freq_hz, pwr_dbm, locked, hop } => {
-                live.cfg = Some(Cfg { freq_hz: *freq_hz, pwr_dbm: *pwr_dbm, locked: *locked, hop: *hop });
+            Line::Cfg {
+                freq_hz,
+                pwr_dbm,
+                locked,
+                hop,
+            } => {
+                live.cfg = Some(Cfg {
+                    freq_hz: *freq_hz,
+                    pwr_dbm: *pwr_dbm,
+                    locked: *locked,
+                    hop: *hop,
+                });
             }
             Line::Who(kv) => {
                 live.who = kv.clone();
@@ -369,16 +427,18 @@ mod app {
         }
     }
 
-    /// Developer tool: drops received packets as if their slot was missed, in bursts (a two-state Gilbert model: in a
-    /// burst every slot is lost, a burst ends with probability 1 / burst, one starts with the probability that gives
-    /// the chosen average loss). Before the engine, so FEC, decoding, the statistics and recordings all see it.
+    /// Developer tool: drops received packets in bursts (two-state Gilbert model), before the engine, so FEC,
+    /// decoding, statistics and recordings all see it.
     struct Injector {
         in_burst: bool,
         rng: u64,
     }
     impl Injector {
         fn new() -> Self {
-            Injector { in_burst: false, rng: (unix_now() * 1e6) as u64 | 1 }
+            Injector {
+                in_burst: false,
+                rng: (unix_now() * 1e6) as u64 | 1,
+            }
         }
         fn uniform(&mut self) -> f64 {
             self.rng ^= self.rng << 13;
@@ -394,7 +454,11 @@ mod app {
             }
             let exit = 1.0 / burst.max(1.0);
             let enter = (share * exit / (1.0 - share).max(1e-6)).min(1.0);
-            self.in_burst = if self.in_burst { self.uniform() >= exit } else { self.uniform() < enter };
+            self.in_burst = if self.in_burst {
+                self.uniform() >= exit
+            } else {
+                self.uniform() < enter
+            };
             self.in_burst
         }
     }
@@ -413,7 +477,9 @@ mod app {
             return Some(format!("{port}: the Ground speaks over-the-air format {f}, this app format {AIR_FORMAT}: update the Ground (setup site, Ground page)"));
         }
         match get("git") {
-            None | Some("unknown") => Some(format!("{port}: the Ground does not report its firmware version: update it (setup site, Ground page)")),
+            None | Some("unknown") => Some(format!(
+                "{port}: the Ground does not report its firmware version: update it (setup site, Ground page)"
+            )),
             Some(g) if GROUND_FW != "unknown" && !GROUND_FW.split(',').any(|ok| ok == bare(g)) => {
                 let want = GROUND_FW.split(',').next().unwrap_or("");
                 Some(format!("{port}: Ground firmware {g} is not up to date (this app: {want}): update it on the setup site, Ground page"))
@@ -423,7 +489,10 @@ mod app {
     }
     /// Asks a Ground that is not the one receiving who it is (W), and closes it again.
     fn probe(name: &str) -> Result<Vec<(String, String)>, String> {
-        let mut p = serialport::new(name, 115200).timeout(Duration::from_millis(50)).open().map_err(|e| format!("{name} does not open: {e}"))?;
+        let mut p = serialport::new(name, 115200)
+            .timeout(Duration::from_millis(50))
+            .open()
+            .map_err(|e| format!("{name} does not open: {e}"))?;
         let _ = p.write_data_terminal_ready(true);
         p.write_all(b"W\n").map_err(|e| format!("{name}: {e}"))?;
         let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
@@ -433,7 +502,11 @@ mod app {
                 buf.extend_from_slice(&chunk[..n]);
                 for line in String::from_utf8_lossy(&buf).lines() {
                     if let Some(rest) = line.strip_prefix("W ") {
-                        return Ok(rest.split_whitespace().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.into(), v.into())).collect());
+                        return Ok(rest
+                            .split_whitespace()
+                            .filter_map(|kv| kv.split_once('='))
+                            .map(|(k, v)| (k.into(), v.into()))
+                            .collect());
                     }
                 }
             }
@@ -444,7 +517,6 @@ mod app {
     fn serial_thread(sh: Arc<Shared>) {
         let mut injector = Injector::new();
         loop {
-            // any Ground that is plugged in (the first that opens; several at once: receive diversity, later)
             let all = grounds();
             if all.is_empty() {
                 sh.live.lock().unwrap().port = String::new();
@@ -472,7 +544,7 @@ mod app {
             let Some((name, mut port)) = opened else {
                 let mut l = sh.live.lock().unwrap();
                 l.port = String::new();
-                l.error = "No receiver could be opened".into(); // why: in `problems`, shown with it
+                l.error = "No receiver could be opened".into(); // the why is in `problems`
                 l.problems = problems;
                 drop(l);
                 std::thread::sleep(Duration::from_secs(1));
@@ -491,7 +563,12 @@ mod app {
             let _ = port.write_all(b"W\nK\n"); // who it is, and the link it keeps
             let mut stream = Stream::default();
             let mut idents = IdentAssembler::default();
-            let mut sink = Sink { aus: Vec::new(), lost: 0, resyncs: 0, recovered: 0 };
+            let mut sink = Sink {
+                aus: Vec::new(),
+                lost: 0,
+                resyncs: 0,
+                recovered: 0,
+            };
             let mut buf: Vec<u8> = Vec::with_capacity(1 << 16);
             let mut chunk = [0u8; 8192];
             // the first moments after opening: what the USB buffer held from before, with gaps that are not losses
@@ -521,7 +598,9 @@ mod app {
                 let t = unix_now();
                 let mut start = 0;
                 while let Some(i) = buf[start..].iter().position(|&b| b == b'\n') {
-                    let mut text = String::from_utf8_lossy(&buf[start..start + i]).trim_end_matches('\r').to_string();
+                    let mut text = String::from_utf8_lossy(&buf[start..start + i])
+                        .trim_end_matches('\r')
+                        .to_string();
                     start += i + 1;
                     if text.starts_with("P ") {
                         let (share, burst) = *sh.inject.lock().unwrap();
@@ -560,7 +639,14 @@ mod app {
                         }
                         if let Some((data, _sent)) = engine::prepare_au(&au) {
                             let epoch = sh.epoch.load(Ordering::Relaxed);
-                            let _ = sh.dec_tx.send(DecMsg { au: data, after_gap, arrival, show: true, live: true, epoch });
+                            let _ = sh.dec_tx.send(DecMsg {
+                                au: data,
+                                after_gap,
+                                arrival,
+                                show: true,
+                                live: true,
+                                epoch,
+                            });
                         }
                     }
                 }
@@ -569,7 +655,7 @@ mod app {
         }
     }
 
-    // ---- decode: every access unit of the source shown, the newest picture kept
+    // Decodes every access unit of the source shown and keeps the newest picture.
     fn decode_thread(sh: Arc<Shared>, rx: Receiver<DecMsg>) {
         let mut dec: Option<Decoder> = None;
         let mut epoch = 0u64;
@@ -606,7 +692,11 @@ mod app {
                 }
                 let done = qpc();
                 if m.live {
-                    sh.live.lock().unwrap().stats.frame(unix_now(), m.au.len(), qpc_ms(done - t0));
+                    sh.live
+                        .lock()
+                        .unwrap()
+                        .stats
+                        .frame(unix_now(), m.au.len(), qpc_ms(done - t0));
                 }
                 if m.show {
                     if m.live {
@@ -627,7 +717,6 @@ mod app {
         }
     }
 
-    // ---- recording, replay, settings (called from the bar, the keys and the Settings window)
     fn toggle_record() {
         let sh = sh();
         let mut r = sh.recorder.lock().unwrap();
@@ -643,10 +732,8 @@ mod app {
         sh.bar_dirty.store(true, Ordering::Relaxed);
     }
 
-    /// The Settings panel: part of the video window as far as the user can tell (no title bar, no taskbar entry), docked
-    /// on the left under the bar while the video is fitted into the rest. It is a separate (owned, borderless) window
-    /// because a window hosting a web view is always composed by Windows: closed, it is hidden, and the video window
-    /// alone is flipped straight to the screen again.
+    /// The Settings panel, docked on the left under the bar. A separate owned, borderless window because a web view is
+    /// always composed: closed, it is hidden and the video window is flipped straight to the screen again.
     static PANEL: AtomicBool = AtomicBool::new(false);
     fn panel_open() -> bool {
         PANEL.load(Ordering::Relaxed)
@@ -662,12 +749,20 @@ mod app {
         let pw = ((w as f32 * 0.42) as i32).max(900.min(w));
         let bar = (h as f32 * BAR_SHARE).round() as i32;
         // on the left, under the bar: where the setup site has its navigation
-        Some(RECT { left: m.left, top: m.top + bar, right: m.left + pw, bottom: m.bottom })
+        Some(RECT {
+            left: m.left,
+            top: m.top + bar,
+            right: m.left + pw,
+            bottom: m.bottom,
+        })
     }
     fn place_panel() {
         if let (Some(w), Some(r)) = (WINDOW.get(), panel_rect()) {
             let _ = w.set_position(tauri::PhysicalPosition::new(r.left, r.top));
-            let _ = w.set_size(tauri::PhysicalSize::new((r.right - r.left) as u32, (r.bottom - r.top) as u32));
+            let _ = w.set_size(tauri::PhysicalSize::new(
+                (r.right - r.left) as u32,
+                (r.bottom - r.top) as u32,
+            ));
         }
     }
     fn set_panel(open: bool) {
@@ -746,13 +841,23 @@ mod app {
                 end: flight.summary.start + flight.summary.duration,
                 ..Default::default()
             }));
-            let readout_keys: [(&str, &str); 5] = [("rssi_dbm", "RSSI"), ("snr_db", "SNR"), ("lq_pct", "link"), ("fps", "fps"), ("video_kbps", "kbit/s")];
+            let readout_keys: [(&str, &str); 5] = [
+                ("rssi_dbm", "RSSI"),
+                ("snr_db", "SNR"),
+                ("lq_pct", "link"),
+                ("fps", "fps"),
+                ("video_kbps", "kbit/s"),
+            ];
             let readout = readout_keys
                 .iter()
                 .filter_map(|(k, l)| flight.series.iter().find(|s| s.0 == *k).map(|s| (*k, *l, s.1.clone())))
                 .collect();
             let title = chrono::DateTime::from_timestamp(flight.summary.start as i64, 0)
-                .map(|d| d.with_timezone(&chrono::Local).format("Flight %-d %b %H:%M").to_string())
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("Flight %-d %b %H:%M")
+                        .to_string()
+                })
                 .unwrap_or_else(|| flight.summary.name.clone());
             *sh.replay.lock().unwrap() = Some(ReplayCtl {
                 tx,
@@ -766,7 +871,12 @@ mod app {
             let mut stream = Stream::default();
             stream.link = engine::recording_link(&rx).unwrap_or(0); // the flight's own link ID
             let mut idents = IdentAssembler::default();
-            let mut collect = Sink { aus: Vec::new(), lost: 0, resyncs: 0, recovered: 0 };
+            let mut collect = Sink {
+                aus: Vec::new(),
+                lost: 0,
+                resyncs: 0,
+                recovered: 0,
+            };
             let mut my_epoch = 0u64;
             let sh2 = sh.clone();
             let sink: replay::Sink = Box::new(move |text, _t, show, fresh| {
@@ -783,7 +893,14 @@ mod app {
                 engine::line(text, &mut stream, &mut collect, &mut idents);
                 for (au, after_gap) in collect.aus.drain(..) {
                     if let Some((data, _)) = engine::prepare_au(&au) {
-                        let _ = sh2.dec_tx.send(DecMsg { au: data, after_gap, arrival: qpc(), show, live: false, epoch: my_epoch });
+                        let _ = sh2.dec_tx.send(DecMsg {
+                            au: data,
+                            after_gap,
+                            arrival: qpc(),
+                            show,
+                            live: false,
+                            epoch: my_epoch,
+                        });
                     }
                 }
             });
@@ -794,20 +911,23 @@ mod app {
         Ok(flight)
     }
 
-    // ---- the video window: nothing but the swap chain (a window hosting a web view is always composed)
+    // The video window: nothing but the swap chain.
     const WM_APP_FOCUS: u32 = WM_APP + 1;
     static VIDEO: AtomicIsize = AtomicIsize::new(0);
     static MOVED: AtomicBool = AtomicBool::new(true); // true: lay the window out at start
     static BUTTONS: Mutex<Vec<(u32, RECT)>> = Mutex::new(Vec::new());
 
-    /// Brings the video window to the front with the keyboard focus (as native_present.cpp focus_window): Windows
-    /// only lets the foreground thread do that, so this thread joins its input queue for a moment. Without focus a
-    /// full-screen window can stay composed (measured with native_rx: a background launch stayed composed).
+    /// Brings the video window to the front with the keyboard focus: Windows only lets the foreground thread do that,
+    /// so this thread joins its input queue for a moment. Without focus a full-screen window can stay composed.
     fn focus_window(hwnd: HWND) {
         unsafe {
             let prior = GetForegroundWindow();
             let own = GetCurrentThreadId();
-            let other = if prior.0.is_null() { own } else { GetWindowThreadProcessId(prior, None) };
+            let other = if prior.0.is_null() {
+                own
+            } else {
+                GetWindowThreadProcessId(prior, None)
+            };
             let attached = other != own && AttachThreadInput(own, other, true).as_bool();
             let _ = BringWindowToTop(hwnd);
             let _ = SetForegroundWindow(hwnd);
@@ -863,7 +983,13 @@ mod app {
             BTN_FWD => replay_cmd(replay::Cmd::Step(10.0)),
             BTN_PLAY => replay_cmd(replay::Cmd::Toggle),
             BTN_SPEED => {
-                let cur = sh().replay.lock().unwrap().as_ref().map(|r| r.state.lock().unwrap().speed).unwrap_or(1.0);
+                let cur = sh()
+                    .replay
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|r| r.state.lock().unwrap().speed)
+                    .unwrap_or(1.0);
                 replay_cmd(replay::Cmd::Speed(speed_next(cur)));
             }
             BTN_LIVE => back_to_live(),
@@ -913,7 +1039,12 @@ mod app {
                     set_bar(true);
                 } else {
                     let (x, y) = ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32);
-                    let hit = BUTTONS.lock().unwrap().iter().find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom).copied();
+                    let hit = BUTTONS
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                        .copied();
                     if let Some((id, r)) = hit {
                         click(id, (x - r.left) as f64 / (r.right - r.left).max(1) as f64);
                     }
@@ -930,7 +1061,13 @@ mod app {
             }
             WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
                 // the pointer only while the bar (and its buttons) is shown; none over the bare video
-                unsafe { SetCursor(if bar_shown() { LoadCursorW(None, IDC_ARROW).ok() } else { None }) };
+                unsafe {
+                    SetCursor(if bar_shown() {
+                        LoadCursorW(None, IDC_ARROW).ok()
+                    } else {
+                        None
+                    })
+                };
                 LRESULT(1)
             }
             WM_CLOSE => {
@@ -945,7 +1082,10 @@ mod app {
     fn monitor_of(on: HWND) -> (HMONITOR, RECT) {
         unsafe {
             let m = MonitorFromWindow(on, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
             let _ = GetMonitorInfoW(m, &mut mi);
             (m, mi.rcMonitor)
         }
@@ -967,25 +1107,55 @@ mod app {
             let (cx, cy) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
             if SHOT.get().is_some() {
                 // never shown: no focus taken, nothing on the screen
-                return CreateWindowExW(WS_EX_TOOLWINDOW, class, w!("Horizon Receiver (shot)"), WS_POPUP, 0, 0, 1920, 1080, None,
-                    None, Some(inst.into()), None);
+                return CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    class,
+                    w!("Horizon Receiver (shot)"),
+                    WS_POPUP,
+                    0,
+                    0,
+                    1920,
+                    1080,
+                    None,
+                    None,
+                    Some(inst.into()),
+                    None,
+                );
             }
             // the monitor it was last on (if that monitor is still there; else the main one)
             let (mut x, mut y, mut w, mut h) = (0, 0, cx, cy);
             if let Some((px, py)) = prefs().monitor {
-                let m = MonitorFromPoint(windows::Win32::Foundation::POINT { x: px, y: py }, MONITOR_DEFAULTTOPRIMARY);
-                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let m = MonitorFromPoint(
+                    windows::Win32::Foundation::POINT { x: px, y: py },
+                    MONITOR_DEFAULTTOPRIMARY,
+                );
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
                 if GetMonitorInfoW(m, &mut mi).as_bool() {
                     let r = mi.rcMonitor;
                     (x, y, w, h) = (r.left, r.top, r.right - r.left, r.bottom - r.top);
                 }
             }
-            CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Horizon Receiver"), WS_POPUP | WS_VISIBLE, x, y, w, h, None, None,
-                Some(inst.into()), None)
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                w!("Horizon Receiver"),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                w,
+                h,
+                None,
+                None,
+                Some(inst.into()),
+                None,
+            )
         }
     }
 
-    // ---- render: the newest picture, at once
+    // Presents the newest picture at once.
     fn render_thread(sh: Arc<Shared>) {
         let hwnd = match video_window() {
             Ok(h) => h,
@@ -1016,18 +1186,23 @@ mod app {
         let Some(mut r) = start(hwnd) else { return };
         let mut monitor = monitor_of(hwnd).0;
         let mut last_size = (0u32, 0u32);
-        let mut frame_log = FRAME_LOG.get().and_then(|p| std::fs::File::create(p).ok()).map(std::io::BufWriter::new);
+        let mut frame_log = FRAME_LOG
+            .get()
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(std::io::BufWriter::new);
         if let Some(f) = frame_log.as_mut() {
             let mut freq = 0;
             unsafe {
                 let _ = QueryPerformanceFrequency(&mut freq);
             }
-            let _ = writeln!(f, "# qpc_frequency={freq}\narrival_qpc,decoded_qpc,present_qpc,present_end_qpc,dxgi_mode");
+            let _ = writeln!(
+                f,
+                "# qpc_frequency={freq}\narrival_qpc,decoded_qpc,present_qpc,present_end_qpc,dxgi_mode"
+            );
         }
         let mut shown_seq = 0;
         let mut px = Vec::new();
         loop {
-            // this thread owns the video window: its messages first
             unsafe {
                 let mut m = MSG::default();
                 while PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
@@ -1042,13 +1217,19 @@ mod app {
                 unsafe {
                     let _ = GetWindowRect(hwnd, &mut cur);
                     if (cur.left, cur.top, cur.right, cur.bottom) != (rect.left, rect.top, rect.right, rect.bottom) {
-                        let _ = SetWindowPos(hwnd, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
-                            SWP_NOZORDER | SWP_NOACTIVATE);
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            rect.bottom - rect.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
                     }
                 }
                 if m != monitor {
                     monitor = m;
-                    // remembered for the next start
                     let mut p = prefs();
                     p.monitor = Some(((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2));
                     save_prefs(p);
@@ -1074,7 +1255,11 @@ mod app {
                     (0, 0, 0, 0, false)
                 }
             };
-            let bar = if sh.bar_shown.load(Ordering::Relaxed) { Some(sh.bar.lock().unwrap().clone()) } else { None };
+            let bar = if sh.bar_shown.load(Ordering::Relaxed) {
+                Some(sh.bar.lock().unwrap().clone())
+            } else {
+                None
+            };
             let p = prefs();
             r.flip = p.flip;
             // the link warning around the video: amber weak, red critical (the Horizon status colours)
@@ -1083,16 +1268,28 @@ mod app {
                 2 => Some([1.0, 0.541, 0.494]),
                 _ => None,
             };
-            r.panel = if panel_open() { panel_rect().map(|p| (p.right - p.left) as f32).unwrap_or(0.0) } else { 0.0 };
+            r.panel = if panel_open() {
+                panel_rect().map(|p| (p.right - p.left) as f32).unwrap_or(0.0)
+            } else {
+                0.0
+            };
             r.notice = sh.notice.lock().unwrap().clone();
             if let Some((path, after)) = SHOT.get() {
                 if started.elapsed().as_secs_f64() >= *after {
                     // --shot: this frame to the file, then exit
                     let size = if new { (w, h) } else { last_size };
                     r.shot = Some(path.clone());
-                    let pic = if px.is_empty() { None } else { Some((px.as_slice(), size.0, size.1)) };
+                    let pic = if px.is_empty() {
+                        None
+                    } else {
+                        Some((px.as_slice(), size.0, size.1))
+                    };
                     let ok = r.present(pic, bar.as_ref()).is_ok() && path.is_file();
-                    println!("{} shot {}", if ok { "RESULT PASS" } else { "RESULT FAIL" }, path.display());
+                    println!(
+                        "{} shot {}",
+                        if ok { "RESULT PASS" } else { "RESULT FAIL" },
+                        path.display()
+                    );
                     std::process::exit(if ok { 0 } else { 1 });
                 }
             }
@@ -1100,7 +1297,11 @@ mod app {
                 // no new picture: redraw only if the bar changed (stats, shown/hidden, moved)
                 if sh.bar_dirty.swap(false, Ordering::Relaxed) {
                     r.wait_ready(100);
-                    let pic = if px.is_empty() { None } else { Some((px.as_slice(), last_size.0, last_size.1)) };
+                    let pic = if px.is_empty() {
+                        None
+                    } else {
+                        Some((px.as_slice(), last_size.0, last_size.1))
+                    };
                     let _ = r.present(pic, bar.as_ref());
                     *BUTTONS.lock().unwrap() = r.buttons.clone();
                 }
@@ -1110,7 +1311,14 @@ mod app {
             last_size = (w, h);
             r.wait_ready(100);
             let before = qpc();
-            match r.present(if px.is_empty() { None } else { Some((px.as_slice(), w, h)) }, bar.as_ref()) {
+            match r.present(
+                if px.is_empty() {
+                    None
+                } else {
+                    Some((px.as_slice(), w, h))
+                },
+                bar.as_ref(),
+            ) {
                 Ok(_) => {
                     let t = qpc();
                     *BUTTONS.lock().unwrap() = r.buttons.clone();
@@ -1127,7 +1335,6 @@ mod app {
         }
     }
 
-    // ---- twice a second: sample, history, stats.csv, the bar, the Settings window
     #[derive(Serialize, Clone)]
     struct Ground {
         port: String,
@@ -1172,8 +1379,17 @@ mod app {
                 problems: l.fw_problem.iter().chain(l.problems.iter()).cloned().collect(),
             }
         };
-        let recording = sh.recorder.lock().unwrap().as_ref().map(|r| Recording { dir: r.dir.to_string_lossy().into_owned(), started: r.started, bytes: r.bytes });
-        let replay = sh.replay.lock().unwrap().as_ref().map(|r| r.state.lock().unwrap().clone());
+        let recording = sh.recorder.lock().unwrap().as_ref().map(|r| Recording {
+            dir: r.dir.to_string_lossy().into_owned(),
+            started: r.started,
+            bytes: r.bytes,
+        });
+        let replay = sh
+            .replay
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| r.state.lock().unwrap().clone());
         AppState {
             ground,
             recording,
@@ -1187,19 +1403,36 @@ mod app {
 
     fn live_bar(s: &Sample, st: &AppState) -> Bar {
         let live = s.get("lq_pct").unwrap_or(0.0) > 0.0;
-        let f = |k: &str, unit: &str, d: usize| if live { s.get(k).map(|v| format!("{v:.d$} {unit}")).unwrap_or("-".into()) } else { "-".into() };
+        let f = |k: &str, unit: &str, d: usize| {
+            if live {
+                s.get(k).map(|v| format!("{v:.d$} {unit}")).unwrap_or("-".into())
+            } else {
+                "-".into()
+            }
+        };
         let g = &st.ground;
         let product = "Ground";
-        let mut detail = if g.error.is_empty() { format!("{product} · {}", g.port) } else { g.error.clone() };
+        let mut detail = if g.error.is_empty() {
+            format!("{product} · {}", g.port)
+        } else {
+            g.error.clone()
+        };
         if !g.problems.is_empty() {
             // errors first, so they are seen
             detail = format!("{}  ·  {detail}", g.problems.join("  ·  "));
         }
         if let Some(c) = &g.cfg {
-            detail += &format!("  ·  {:.3} MHz{}  ·  LR2021 {} dBm", c.freq_hz as f64 / 1e6, if c.locked { "" } else { " (searching)" }, c.pwr_dbm);
+            detail += &format!(
+                "  ·  {:.3} MHz{}  ·  LR2021 {} dBm",
+                c.freq_hz as f64 / 1e6,
+                if c.locked { "" } else { " (searching)" },
+                c.pwr_dbm
+            );
         }
         if let Some((t, call)) = &g.ident {
-            let at = chrono::DateTime::from_timestamp(*t as i64, 0).map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+            let at = chrono::DateTime::from_timestamp(*t as i64, 0)
+                .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                .unwrap_or_default();
             detail += &format!("  ·  callsign {call}, heard {at}");
         }
         let (rep, lost, fec) = {
@@ -1227,7 +1460,10 @@ mod app {
             ],
             detail,
             warn: !g.error.is_empty() || !g.problems.is_empty() || inj > 0.0 || level > 0,
-            rec: st.recording.as_ref().map(|r| format!("REC {}", mmss(unix_now() - r.started))),
+            rec: st
+                .recording
+                .as_ref()
+                .map(|r| format!("REC {}", mmss(unix_now() - r.started))),
             replay: None,
         }
     }
@@ -1252,7 +1488,11 @@ mod app {
                 })
             })
             .collect();
-        let detail = if !st.error.is_empty() { st.error.clone() } else { format!("at {}:  {}", mmss(st.pos - st.start), at.join("  ·  ")) };
+        let detail = if !st.error.is_empty() {
+            st.error.clone()
+        } else {
+            format!("at {}:  {}", mmss(st.pos - st.start), at.join("  ·  "))
+        };
         Some(Bar {
             stats: Vec::new(),
             detail,
@@ -1262,7 +1502,11 @@ mod app {
                 title: r.title.clone(),
                 time: format!("{} / {}", mmss(st.pos - st.start), mmss(dur)),
                 playing: st.playing,
-                speed: if st.speed == 0.5 { "½×".into() } else { format!("{}×", st.speed) },
+                speed: if st.speed == 0.5 {
+                    "½×".into()
+                } else {
+                    format!("{}×", st.speed)
+                },
                 live: format!("LIVE link {:.0} %", sample.get("lq_pct").unwrap_or(0.0)),
                 progress: (st.pos - st.start) / dur,
                 marks: r.marks.iter().map(|m| (m - st.start) / dur).collect(),
@@ -1270,9 +1514,9 @@ mod app {
         })
     }
 
-    /// The link warning from one statistics sample. SNR margin: the SNR above what SF5 needs (-2.5 dB, plus about 1 dB
-    /// a real receiver loses), the same figure the Link budget page uses. Weak (amber): link quality under 95 % or under
-    /// 6 dB margin; critical (red): under 70 %, under 3 dB, or the signal gone. Only once the link has been up.
+    /// The link warning from one statistics sample. SNR margin: the SNR above what SF5 needs (-2.5 dB plus ~1 dB
+    /// implementation loss), as on the Link budget page. Weak: link quality under 95 % or under 6 dB margin;
+    /// critical: under 70 %, under 3 dB, or the signal gone. Only once the link has been up.
     struct Alerter {
         had_link: bool,
         level: u8,
@@ -1283,7 +1527,13 @@ mod app {
     }
     impl Alerter {
         fn new() -> Self {
-            Alerter { had_link: false, level: 0, hold_until: 0.0, up_since: 0.0, down: true }
+            Alerter {
+                had_link: false,
+                level: 0,
+                hold_until: 0.0,
+                up_since: 0.0,
+                down: true,
+            }
         }
         fn next(&mut self, s: &Sample, port_ok: bool, now: f64) -> (u8, String) {
             let lq = s.get("lq_pct").unwrap_or(0.0);
@@ -1317,17 +1567,28 @@ mod app {
             } else if now >= self.hold_until {
                 self.level = raw;
             }
-            (self.level, if self.level == 0 { String::new() } else if raw == 0 { "LINK RECOVERING".into() } else { why })
+            (
+                self.level,
+                if self.level == 0 {
+                    String::new()
+                } else if raw == 0 {
+                    "LINK RECOVERING".into()
+                } else {
+                    why
+                },
+            )
         }
     }
 
-    /// "Why is there no picture?": ten times a second, while live (not replaying), the diagnosis of diag.rs; a change
-    /// redraws the video (the notice must appear while no picture comes to trigger a redraw).
+    /// "Why is there no picture?" (diag.rs), ten times a second while live; a change redraws the video, since no
+    /// picture comes to trigger a redraw.
     fn diag_thread(sh: Arc<Shared>) {
         let started = unix_now();
         loop {
             std::thread::sleep(Duration::from_millis(100));
-            let notice = if sh.replaying.load(Ordering::Relaxed) || SHOT.get().is_some_and(|_| std::env::var_os("HZ_TEST_NOTICE").is_none()) {
+            let notice = if sh.replaying.load(Ordering::Relaxed)
+                || SHOT.get().is_some_and(|_| std::env::var_os("HZ_TEST_NOTICE").is_none())
+            {
                 None
             } else {
                 let last = sh.history.lock().unwrap().back().cloned();
@@ -1336,7 +1597,11 @@ mod app {
                     now: unix_now(),
                     started,
                     ground: !l.port.is_empty(),
-                    ground_error: if l.problems.is_empty() { l.error.clone() } else { format!("{} {}", l.error, l.problems.join("; ")) },
+                    ground_error: if l.problems.is_empty() {
+                        l.error.clone()
+                    } else {
+                        format!("{} {}", l.error, l.problems.join("; "))
+                    },
                     last_picture: f64::from_bits(sh.last_picture.load(Ordering::Relaxed)),
                     last_heard: l.last_heard,
                     link_since: l.link_since,
@@ -1384,9 +1649,17 @@ mod app {
             }
             let st = app_state(Some(sample.clone()));
             let alert = alerter.next(&sample, !st.ground.port.is_empty(), unix_now());
-            let mut alert = if sh.replaying.load(Ordering::Relaxed) { (0, String::new()) } else { alert };
+            let mut alert = if sh.replaying.load(Ordering::Relaxed) {
+                (0, String::new())
+            } else {
+                alert
+            };
             // testing only (with --shot): HZ_TEST_ALERT=1|2 shows that warning level
-            if let Some(l) = std::env::var("HZ_TEST_ALERT").ok().and_then(|v| v.parse::<u8>().ok()).filter(|l| (1..=2).contains(l)) {
+            if let Some(l) = std::env::var("HZ_TEST_ALERT")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .filter(|l| (1..=2).contains(l))
+            {
                 alert = (l, format!("TEST: warning level {l}"));
             }
             *sh.alert.lock().unwrap() = alert;
@@ -1397,7 +1670,6 @@ mod app {
         }
     }
 
-    // ---- the Settings window's commands
     #[derive(Serialize)]
     struct Field {
         key: &'static str,
@@ -1406,7 +1678,10 @@ mod app {
     }
     #[tauri::command]
     fn fields() -> Vec<Field> {
-        STAT_FIELDS.iter().map(|(key, label, unit)| Field { key, label, unit }).collect()
+        STAT_FIELDS
+            .iter()
+            .map(|(key, label, unit)| Field { key, label, unit })
+            .collect()
     }
     #[tauri::command]
     fn state() -> AppState {
@@ -1415,7 +1690,13 @@ mod app {
     }
     #[tauri::command]
     fn history(since: f64) -> Vec<Sample> {
-        sh().history.lock().unwrap().iter().filter(|s| s.time > since).cloned().collect()
+        sh().history
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.time > since)
+            .cloned()
+            .collect()
     }
     fn send(cmd: String) {
         sh().outbox.lock().unwrap().push(cmd);
@@ -1477,7 +1758,11 @@ mod app {
     #[tauri::command]
     fn export_video(dir: String, from: f64, to: f64) -> String {
         let d = std::path::PathBuf::from(&dir);
-        let name = |t: f64| chrono::DateTime::from_timestamp(t as i64, 0).map(|x| x.with_timezone(&chrono::Local).format("%H%M%S").to_string()).unwrap_or_default();
+        let name = |t: f64| {
+            chrono::DateTime::from_timestamp(t as i64, 0)
+                .map(|x| x.with_timezone(&chrono::Local).format("%H%M%S").to_string())
+                .unwrap_or_default()
+        };
         let out = d.join(format!("video_{}-{}.mp4", name(from), name(to)));
         let out_s = out.to_string_lossy().into_owned();
         let o2 = out_s.clone();
@@ -1494,10 +1779,13 @@ mod app {
             };
             let r = crate::export::export(&d, from, to, &out, &mut progress);
             if let Some(w) = WINDOW.get() {
-                let _ = w.emit("export", match r {
-                    Ok(p) => serde_json::json!({ "path": p.to_string_lossy(), "progress": 1.0, "done": true }),
-                    Err(e) => serde_json::json!({ "path": o2, "error": e, "done": true }),
-                });
+                let _ = w.emit(
+                    "export",
+                    match r {
+                        Ok(p) => serde_json::json!({ "path": p.to_string_lossy(), "progress": 1.0, "done": true }),
+                        Err(e) => serde_json::json!({ "path": o2, "error": e, "done": true }),
+                    },
+                );
             }
         });
         out_s
@@ -1511,7 +1799,9 @@ mod app {
         });
         let target = std::path::Path::new(&p);
         let _ = if target.is_file() {
-            std::process::Command::new("explorer").arg(format!("/select,{p}")).spawn()
+            std::process::Command::new("explorer")
+                .arg(format!("/select,{p}"))
+                .spawn()
         } else {
             std::process::Command::new("explorer").arg(&p).spawn()
         };
@@ -1539,7 +1829,11 @@ mod app {
     #[tauri::command]
     async fn choose_out_dir(app: tauri::AppHandle) -> Option<String> {
         use tauri_plugin_dialog::DialogExt;
-        let dir = app.dialog().file().set_directory(session::out_dir()).blocking_pick_folder()?;
+        let dir = app
+            .dialog()
+            .file()
+            .set_directory(session::out_dir())
+            .blocking_pick_folder()?;
         let dir = dir.into_path().ok()?.to_string_lossy().into_owned();
         let mut p = prefs();
         p.out_dir = Some(dir.clone());
@@ -1550,7 +1844,11 @@ mod app {
     #[tauri::command]
     async fn pick_flight(app: tauri::AppHandle) -> Option<String> {
         use tauri_plugin_dialog::DialogExt;
-        let dir = app.dialog().file().set_directory(session::out_dir()).blocking_pick_folder()?;
+        let dir = app
+            .dialog()
+            .file()
+            .set_directory(session::out_dir())
+            .blocking_pick_folder()?;
         Some(dir.into_path().ok()?.to_string_lossy().into_owned())
     }
     #[tauri::command]
@@ -1569,36 +1867,70 @@ mod app {
             let mut values = vec![None; STAT_FIELDS.len()];
             values[STAT_FIELDS.iter().position(|f| f.0 == "lq_pct").unwrap()] = Some(lq);
             values[STAT_FIELDS.iter().position(|f| f.0 == "snr_db").unwrap()] = Some(snr);
-            Sample { time: 0.0, values, totals: vec![0; crate::stats::TOTAL_FIELDS.len()] }
+            Sample {
+                time: 0.0,
+                values,
+                totals: vec![0; crate::stats::TOTAL_FIELDS.len()],
+            }
         }
         #[test]
         fn levels_and_hold() {
             let mut a = Alerter::new();
-            assert_eq!(a.next(&sample(0.0, 0.0), true, 0.0).0, 0, "no warning before the link was ever up");
-            assert_eq!(a.next(&sample(20.0, 2.0), true, 1.0).0, 0, "link coming up: quality still filling");
-            assert_eq!(a.next(&sample(60.0, 9.0), true, 5.5).0, 0, "within 5 s of the link coming up");
+            assert_eq!(
+                a.next(&sample(0.0, 0.0), true, 0.0).0,
+                0,
+                "no warning before the link was ever up"
+            );
+            assert_eq!(
+                a.next(&sample(20.0, 2.0), true, 1.0).0,
+                0,
+                "link coming up: quality still filling"
+            );
+            assert_eq!(
+                a.next(&sample(60.0, 9.0), true, 5.5).0,
+                0,
+                "within 5 s of the link coming up"
+            );
             assert_eq!(a.next(&sample(100.0, 9.0), true, 11.0).0, 0, "good link");
             assert_eq!(a.next(&sample(90.0, 9.0), true, 12.0).0, 1, "under 95 %: weak");
             assert_eq!(a.next(&sample(100.0, 3.0), true, 13.0).0, 1, "4.5 dB margin: weak");
             assert_eq!(a.next(&sample(100.0, 0.0), true, 14.0).0, 2, "1.5 dB margin: critical");
-            assert_eq!(a.next(&sample(100.0, 9.0), true, 15.0).0, 2, "held for 2 s after it clears");
+            assert_eq!(
+                a.next(&sample(100.0, 9.0), true, 15.0).0,
+                2,
+                "held for 2 s after it clears"
+            );
             assert_eq!(a.next(&sample(100.0, 9.0), true, 16.1).0, 0, "then clear");
             assert_eq!(a.next(&sample(0.0, 0.0), true, 17.0).1, "SIGNAL LOST");
-            assert_eq!(a.next(&sample(50.0, 9.0), true, 18.0).1, "LINK RECOVERING", "back after a loss: the lost alert winds down");
-            assert_eq!(a.next(&sample(50.0, 9.0), true, 20.5).0, 0, "then the 5 s grace of the new link, not LINK CRITICAL");
+            assert_eq!(
+                a.next(&sample(50.0, 9.0), true, 18.0).1,
+                "LINK RECOVERING",
+                "back after a loss: the lost alert winds down"
+            );
+            assert_eq!(
+                a.next(&sample(50.0, 9.0), true, 20.5).0,
+                0,
+                "then the 5 s grace of the new link, not LINK CRITICAL"
+            );
             assert_eq!(a.next(&sample(100.0, 9.0), false, 18.5).1, "RECEIVER LOST");
         }
     }
 
     pub fn run() {
-        // Per-monitor DPI aware: the swap chain must have the screen's real pixels. A DPI-unaware window is scaled
-        // by Windows, which means it is always composed (never flipped straight to the screen) and blurred.
+        // Per-monitor DPI aware: a DPI-unaware window is scaled by Windows, so always composed and blurred.
         unsafe {
-            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            );
         }
         let args: Vec<String> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--shot") {
-            let after = args.iter().position(|a| a == "--shot-after").and_then(|j| args.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(6.0);
+            let after = args
+                .iter()
+                .position(|a| a == "--shot-after")
+                .and_then(|j| args.get(j + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6.0);
             if let Some(p) = args.get(i + 1) {
                 let _ = SHOT.set((std::path::PathBuf::from(p), after));
             }
@@ -1609,21 +1941,21 @@ mod app {
             single_instance_or_exit();
         }
         fn single_instance_or_exit() {
-        unsafe {
-            let _guard = windows::Win32::System::Threading::CreateMutexW(None, true, w!("Local\\HorizonReceiver"));
-            if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
-                if let Ok(h) = FindWindowW(w!("HorizonReceiverVideo"), None) {
-                    // this (just started) process may set the foreground; the running one may not, unless allowed
-                    let mut pid = 0u32;
-                    GetWindowThreadProcessId(h, Some(&mut pid));
-                    let _ = AllowSetForegroundWindow(pid);
-                    let _ = SetForegroundWindow(h);
-                    let _ = PostMessageW(Some(h), WM_APP_FOCUS, WPARAM(0), LPARAM(0));
+            unsafe {
+                let _guard = windows::Win32::System::Threading::CreateMutexW(None, true, w!("Local\\HorizonReceiver"));
+                if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
+                    if let Ok(h) = FindWindowW(w!("HorizonReceiverVideo"), None) {
+                        // this (just started) process may set the foreground; the running one may not, unless allowed
+                        let mut pid = 0u32;
+                        GetWindowThreadProcessId(h, Some(&mut pid));
+                        let _ = AllowSetForegroundWindow(pid);
+                        let _ = SetForegroundWindow(h);
+                        let _ = PostMessageW(Some(h), WM_APP_FOCUS, WPARAM(0), LPARAM(0));
+                    }
+                    std::process::exit(0);
                 }
-                std::process::exit(0);
+                std::mem::forget(_guard);
             }
-            std::mem::forget(_guard);
-        }
         }
         if let Some(i) = args.iter().position(|a| a == "--frame-log") {
             if let Some(p) = args.get(i + 1) {
@@ -1632,13 +1964,34 @@ mod app {
         }
         *session::OUT_DIR.lock().unwrap() = prefs().out_dir.map(Into::into);
         // --open DIR: open a recorded session at start (Settings on its Flight page, the replay in the viewer)
-        let open_at_start = args.iter().position(|a| a == "--open").and_then(|i| args.get(i + 1)).cloned();
+        let open_at_start = args
+            .iter()
+            .position(|a| a == "--open")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
         tauri::Builder::default()
             .plugin(tauri_plugin_dialog::init())
             .invoke_handler(tauri::generate_handler![
-                fields, state, history, set_frequency, set_power, set_hopping, record, sessions,
-                open_flight, replay_control, export_video, open_folder, toggle_bar, close_settings, quit, get_prefs, set_prefs, set_injection,
-                choose_out_dir, pick_flight
+                fields,
+                state,
+                history,
+                set_frequency,
+                set_power,
+                set_hopping,
+                record,
+                sessions,
+                open_flight,
+                replay_control,
+                export_video,
+                open_folder,
+                toggle_bar,
+                close_settings,
+                quit,
+                get_prefs,
+                set_prefs,
+                set_injection,
+                choose_out_dir,
+                pick_flight
             ])
             .setup(move |app| {
                 let win = app.get_webview_window("main").expect("settings window");
@@ -1655,7 +2008,14 @@ mod app {
                 let sh = Arc::new(Shared {
                     live: Mutex::new(Live::default()),
                     history: Mutex::new(VecDeque::new()),
-                    latest: Mutex::new(Latest { seq: 0, w: 0, h: 0, px: Vec::new(), arrival: 0, decoded: 0 }),
+                    latest: Mutex::new(Latest {
+                        seq: 0,
+                        w: 0,
+                        h: 0,
+                        px: Vec::new(),
+                        arrival: 0,
+                        decoded: 0,
+                    }),
                     cv: Condvar::new(),
                     bar_shown: AtomicBool::new(!std::env::args().any(|a| a == "--hide-overlay" || a == "--no-bar")),
                     bar: Mutex::new(Bar::default()),

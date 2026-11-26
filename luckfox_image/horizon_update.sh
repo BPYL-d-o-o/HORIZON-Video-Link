@@ -8,8 +8,9 @@
 #   1. unpack and check it (an Air bundle with programs, scripts and radio controller firmware)
 #   2. keep the installed files in /usr/share/horizon.prev, stop the transmitter
 #   3. install: each file written beside the old one and renamed over it (a running script keeps its old copy)
-#   4. the radio controller: flashed over SWD when its firmware changed (rp2354_update.sh flash, which restarts the
-#      transmitter), else the transmitter restarts
+#   4. the radio controller: flashed when its firmware changed (rp2354_update.sh flash: over SPI in a few seconds, or
+#      over SWD in ~20 s when its firmware predates the SPI update; it restarts the transmitter), else the transmitter
+#      restarts
 #   5. the transmitter must run and identify within 60 s; otherwise the previous files come back (and the previous
 #      radio controller firmware is flashed again)
 # The settings (/userdata/horizon_vtx/horizon_vtx.conf: callsign, frequency, power) are kept.
@@ -22,8 +23,7 @@ bundle=${1:?usage: horizon_update.sh BUNDLE.tar.xz}
 share=/usr/share/horizon
 prev=/usr/share/horizon.prev
 dir=/userdata/horizon_vtx
-# on the card, not in /tmp: /tmp is RAM, and the Air has ~15 MB free with the camera running (an update in RAM once
-# starved it until everything stalled)
+# on the card, not in /tmp: /tmp is RAM, and the Air has ~15 MB free with the camera running
 work=/userdata/horizon_update.work
 fail() { echo "RESULT FAIL $*"; logger -t horizon_update "FAIL $*"; rm -rf "$work"; exit 1; }
 say() { echo "EVENT $*"; logger -t horizon_update "$*"; }
@@ -88,7 +88,7 @@ if cmp -s "$work/share/rp2354.elf" "$prev/rp2354.elf" && [ "$(cat "$dir/rp2354.f
     say "radio controller firmware unchanged"
     sh "$dir/service.sh" start >/dev/null 2>&1
 else
-    say "flashing the radio controller (about 20 s)"
+    say "flashing the radio controller (a few seconds; about 20 s over SWD)"
     out=$(sh "$share/rp2354_update.sh" flash 2>&1)
     echo "$out" | grep -q '^RESULT PASS' || restore "radio controller flash failed: $(echo "$out" | grep -m1 -E 'ERROR|FAIL')"
 fi
@@ -101,9 +101,9 @@ while [ "$i" -lt 60 ]; do
     sleep 1; i=$((i + 1))
 done
 [ "$i" -lt 60 ] || restore "the transmitter did not start"
-# the LED and its 30 s self-check: the new script
+# images before this one ran a LED script (horizon_led.sh) every 30 s: stop it
 pid=$(ps | grep '[h]orizon_led.sh' | awk '{ print $1 }'); [ -n "$pid" ] && kill $pid 2>/dev/null
-setsid sh -c "sh $share/horizon_led.sh 2>&1 | logger -t horizon_led" </dev/null >/dev/null 2>&1 &
+rm -f "$share/horizon_led.sh"
 rm -rf "$work"
 sync
 say "installed $new"

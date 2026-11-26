@@ -1,0 +1,12 @@
+# C and C++ (radio_firmware/src, transmitter, format): for new code and edits (clang-format -i FILE). The existing
+# files are not reformatted wholesale; pointer alignment follows each file's own majority.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+DerivePointerAlignment: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+IncludeBlocks: Preserve
+SortIncludes: Never
+SpacesBeforeTrailingComments: 2

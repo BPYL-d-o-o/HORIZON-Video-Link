@@ -1,5 +1,4 @@
-//! Link statistics over a sliding 1 s window, sampled twice a second: the same fields and rules as the earlier Python
-//! receiver, so stats.csv keeps its columns and sessions it recorded still open.
+//! Link statistics over a sliding 1 s window, sampled twice a second.
 use serde::Serialize;
 use std::collections::VecDeque;
 
@@ -30,8 +29,21 @@ pub const STAT_FIELDS: &[(&str, &str, &str)] = &[
 ];
 /// Running totals, after the statistics in stats.csv.
 pub const TOTAL_FIELDS: &[&str] = &[
-    "pkts", "filler", "misses", "blocks_ok", "blocks_lost", "frames", "decode_errors", "resyncs", "out_dropped",
-    "aus_dropped", "repaired", "crc32_bad", "idents", "held", "concealed",
+    "pkts",
+    "filler",
+    "misses",
+    "blocks_ok",
+    "blocks_lost",
+    "frames",
+    "decode_errors",
+    "resyncs",
+    "out_dropped",
+    "aus_dropped",
+    "repaired",
+    "crc32_bad",
+    "idents",
+    "held",
+    "concealed",
 ];
 
 /// One sample: the time (unix seconds) and a value per STAT_FIELDS entry (None: nothing to average), plus totals.
@@ -47,7 +59,11 @@ impl Sample {
         STAT_FIELDS.iter().position(|f| f.0 == key).and_then(|i| self.values[i])
     }
     pub fn total(&self, key: &str) -> u64 {
-        TOTAL_FIELDS.iter().position(|f| *f == key).map(|i| self.totals[i]).unwrap_or(0)
+        TOTAL_FIELDS
+            .iter()
+            .position(|f| *f == key)
+            .map(|i| self.totals[i])
+            .unwrap_or(0)
     }
     pub fn csv_header() -> String {
         let mut h = vec!["time".to_string()];
@@ -64,7 +80,11 @@ impl Sample {
 }
 
 fn format_num(x: f64) -> String {
-    if x.fract() == 0.0 && x.abs() < 1e12 { format!("{}", x as i64) } else { format!("{:.2}", x) }
+    if x.fract() == 0.0 && x.abs() < 1e12 {
+        format!("{}", x as i64)
+    } else {
+        format!("{:.2}", x)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -97,12 +117,23 @@ fn mean(it: impl Iterator<Item = f64>) -> Option<f64> {
         s += v;
         n += 1;
     }
-    if n > 0 { Some((s / n as f64 * 100.0).round() / 100.0) } else { None }
+    if n > 0 {
+        Some((s / n as f64 * 100.0).round() / 100.0)
+    } else {
+        None
+    }
 }
 
 impl Default for Stats {
     fn default() -> Self {
-        Stats { pk: VecDeque::new(), miss: VecDeque::new(), blk: VecDeque::new(), rep: VecDeque::new(), frm: VecDeque::new(), tot: vec![0; TOTAL_FIELDS.len()] }
+        Stats {
+            pk: VecDeque::new(),
+            miss: VecDeque::new(),
+            blk: VecDeque::new(),
+            rep: VecDeque::new(),
+            frm: VecDeque::new(),
+            tot: vec![0; TOTAL_FIELDS.len()],
+        }
     }
 }
 
@@ -117,7 +148,16 @@ impl Stats {
         if filler {
             self.inc("filler", 1);
         }
-        self.pk.push_back(Pk { t, rssi: r.rssi, rsig: r.rssi_sig, snr: r.snr, foff: r.foff_hz, dt: r.timing_us, noise: r.noise, filler });
+        self.pk.push_back(Pk {
+            t,
+            rssi: r.rssi,
+            rsig: r.rssi_sig,
+            snr: r.snr,
+            foff: r.foff_hz,
+            dt: r.timing_us,
+            noise: r.noise,
+            filler,
+        });
     }
     pub fn missed(&mut self, t: f64, crc: bool) {
         self.inc("misses", 1);
@@ -178,8 +218,18 @@ impl Stats {
         set("rssi_dbm", mean(pk.iter().map(|p| p.rssi as f64)));
         set("rssi_sig_dbm", mean(pk.iter().map(|p| p.rsig as f64)));
         set("snr_db", mean(pk.iter().map(|p| p.snr as f64)));
-        set("noise_dbm", mean(pk.iter().filter(|p| p.noise.abs() < 4000.0).map(|p| p.noise as f64)));
-        set("lq_pct", Some(if n_slots > 0 { (1000.0 * pk.len() as f64 / n_slots as f64).round() / 10.0 } else { 0.0 }));
+        set(
+            "noise_dbm",
+            mean(pk.iter().filter(|p| p.noise.abs() < 4000.0).map(|p| p.noise as f64)),
+        );
+        set(
+            "lq_pct",
+            Some(if n_slots > 0 {
+                (1000.0 * pk.len() as f64 / n_slots as f64).round() / 10.0
+            } else {
+                0.0
+            }),
+        );
         set("pps", Some(pk.len() as f64));
         set("data_pps", Some(pk.iter().filter(|p| !p.filler).count() as f64));
         set("filler_pps", Some(pk.iter().filter(|p| p.filler).count() as f64));
@@ -187,14 +237,28 @@ impl Stats {
         set("crc_ps", Some(self.miss.iter().filter(|m| m.1).count() as f64));
         set("blocks_ok_ps", Some((nb - lost) as f64));
         set("blocks_lost_ps", Some(lost as f64));
-        set("block_loss_pct", Some(if nb > 0 { (1000.0 * lost as f64 / nb as f64).round() / 10.0 } else { 0.0 }));
+        set(
+            "block_loss_pct",
+            Some(if nb > 0 {
+                (1000.0 * lost as f64 / nb as f64).round() / 10.0
+            } else {
+                0.0
+            }),
+        );
         set("repaired_ps", Some(self.rep.len() as f64));
         set("fps", Some(self.frm.len() as f64));
-        set("video_kbps", Some((self.frm.iter().map(|f| f.1).sum::<usize>() as f64 * 8.0 / 100.0).round() / 10.0));
+        set(
+            "video_kbps",
+            Some((self.frm.iter().map(|f| f.1).sum::<usize>() as f64 * 8.0 / 100.0).round() / 10.0),
+        );
         set("decode_ms", mean(self.frm.iter().map(|f| f.2)));
         set("foff_hz", mean(pk.iter().map(|p| p.foff as f64)));
         set("timing_us", mean(pk.iter().map(|p| p.dt as f64)));
-        Sample { time: (now * 1000.0).round() / 1000.0, values: v, totals: self.tot.clone() }
+        Sample {
+            time: (now * 1000.0).round() / 1000.0,
+            values: v,
+            totals: self.tot.clone(),
+        }
     }
 }
 
@@ -210,7 +274,10 @@ mod tests {
     #[test]
     fn link_quality_counts_misses() {
         let mut s = Stats::default();
-        let r = crate::engine::Radio { rssi: -80.0, ..Default::default() };
+        let r = crate::engine::Radio {
+            rssi: -80.0,
+            ..Default::default()
+        };
         for i in 0..9 {
             s.packet(10.0 + i as f64 * 0.05, &r, false);
         }

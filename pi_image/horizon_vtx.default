@@ -1,0 +1,4 @@
+# /etc/default/horizon_vtx: extra options for /opt/horizon/hz_vtx when it runs as horizon_vtx.service
+# (sudo systemctl restart horizon_vtx to apply; /opt/horizon/hz_vtx --help lists them). Empty: the camera at 288x160,
+# block FEC 8+4, and the frequency plan, TX power and callsign the HAT keeps (the setup site's Pair).
+HORIZON_VTX_ARGS=""

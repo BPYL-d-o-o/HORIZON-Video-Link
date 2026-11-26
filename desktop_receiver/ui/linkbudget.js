@@ -23,8 +23,7 @@ const LB = (() => {
     ['Urban', 'logd', 3.5, false, 'streets, no line of sight (n = 3.5)'],
     ['Dense urban, indoors', 'logd', 4.0, false, 'through buildings and walls (n = 4.0)'],
   ];
-  // This system as it runs today: format v4 (255-byte packets carrying 231 bytes of video: seq 2 + header 4 + CRC 2 +
-  // Reed-Solomon 16), SF5 / 1000 kHz / LI 4/5, 18.7 ms slots, block FEC 8+4, 576x320 at 30 fps (hz_vtx defaults since 2026-11-22).
+  // hz_vtx defaults: 231 bytes of video per 255-byte packet, block FEC 8+4, 576x320 at 30 fps.
   const DEFAULTS = {
     freq_mhz: 868, sf: 5, bw_khz: 1000, cr: 4, preamble: 12, payload: 255, overhead: 24, crc: true, explicit: true,
     guard_ms: 1.67, fec_k: 8, fec_m: 4, util: 1.0,

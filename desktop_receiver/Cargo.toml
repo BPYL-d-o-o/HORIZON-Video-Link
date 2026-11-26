@@ -13,9 +13,18 @@ crate-type = ["rlib"]
 name = "horizon_receiver"
 path = "src/main.rs"
 
+# test tools (desktop_receiver/test/): not part of the app
 [[bin]]
 name = "engine_check"
-path = "src/bin/engine_check.rs"
+path = "test/engine_check.rs"
+
+[[bin]]
+name = "hold_check"
+path = "test/hold_check.rs"
+
+[[bin]]
+name = "grey_stats"
+path = "test/grey_stats.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Builds Horizon Receiver for Windows (desktop_receiver/, Tauri + Rust, with win_decoder's hz_decoder.dll) from a git
+# Builds Horizon Receiver for Windows (desktop_receiver/, Tauri + Rust, with decoder/'s hz_decoder.dll) from a git
 # tree, as ONE executable. Run from Git Bash on Windows with the Rust MSVC toolchain (stable-x86_64-pc-windows-msvc,
 # Visual Studio Build Tools with the C++ workload: it links Microsoft's WebView2 loader into the executable) and WSL
-# (the decoder DLL is cross-built there with MinGW: win_decoder/build_native.sh; the executable carries it, build.rs).
+# (the decoder DLL is cross-built there with MinGW: decoder/native/build_native.sh; the executable carries it, build.rs).
 #
 #   sh tools/build_desktop_app.sh check   TREE-ISH                    compile only (the pre-commit check)
 #   sh tools/build_desktop_app.sh release TREE-ISH VERSION OUT_DIR    build, smoke-test (--shot), for the setup site:
@@ -25,7 +25,7 @@ t0=$(date +%s)
 
 # the Ground firmware this build accepts: every commit whose firmware sources are the same as the tree's
 # (the paths tools/git-hooks/air_hooks.sh fingerprints; build.rs does the same in a checkout)
-FW_PATHS="lora_vlink/src pi5_vtx/swfec.py lora_vlink/CMakeLists.txt lora_vlink/pico_sdk_import.cmake lora_vlink/third_party luckfox_vtx luckfox_image"
+FW_PATHS="radio_firmware/src format radio_firmware/CMakeLists.txt radio_firmware/pico_sdk_import.cmake radio_firmware/third_party transmitter luckfox_image"
 commit=$(git rev-parse --verify -q "$tree^{commit}" 2>/dev/null || git rev-parse HEAD)
 last=$(git log -1 --format=%H "$commit" -- $FW_PATHS)
 fw=
@@ -40,12 +40,12 @@ export HZ_GROUND_FW=${fw:-unknown}
 # the sources from git, in place of the previous ones (Cargo's target folder is elsewhere and stays)
 src=$build/src
 rm -rf "$src"; mkdir -p "$src" "$build/target"
-git -c core.autocrlf=false archive --format=tar "$tree" -- desktop_receiver win_decoder | tar -x -C "$src"
+git -c core.autocrlf=false archive --format=tar "$tree" -- desktop_receiver decoder/decoder.c decoder/decoder.h decoder/native | tar -x -C "$src"
 
 echo "EVENT decoder dll"
 wsrc=$(wsl.exe --exec wslpath -u "$(cygpath -w "$src")" | tr -d '\r')
-MSYS_NO_PATHCONV=1 wsl.exe --exec sh "$wsrc/win_decoder/build_native.sh" >"$build/dll.log" 2>&1 || { tail -5 "$build/dll.log"; fail "win_decoder/build_native.sh (see $build/dll.log)"; }
-grep -q '^RESULT PASS' "$build/dll.log" || fail "win_decoder/build_native.sh (see $build/dll.log)"
+MSYS_NO_PATHCONV=1 wsl.exe --exec sh "$wsrc/decoder/native/build_native.sh" >"$build/dll.log" 2>&1 || { tail -5 "$build/dll.log"; fail "decoder/native/build_native.sh (see $build/dll.log)"; }
+grep -q '^RESULT PASS' "$build/dll.log" || fail "decoder/native/build_native.sh (see $build/dll.log)"
 
 echo "EVENT cargo build (Ground firmware accepted: $HZ_GROUND_FW)"
 (cd "$src/desktop_receiver" && CARGO_TARGET_DIR=$(cygpath -w "$build/target") cargo +"$TOOLCHAIN" build --release \

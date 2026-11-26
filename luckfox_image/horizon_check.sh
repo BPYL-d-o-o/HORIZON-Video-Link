@@ -5,8 +5,8 @@
 #
 #   sh horizon_check.sh      lines "CHECK <part> ok|warn|fail <text>", then "CHECK result=PASS|WARN|FAIL"
 #
-# Run at boot after the transmitter starts (rp2354_update.sh boot; result in syslog and /run/horizon_check.txt) and
-# on request over the USB serial port (horizon_pair.sh "S": the setup site's Air page).
+# Run at boot after the transmitter starts (rp2354_update.sh boot; result in syslog) and on request over the USB
+# serial port (horizon_pair.sh "S": the setup site's Air page, test/device.py).
 share=/usr/share/horizon
 dir=/userdata/horizon_vtx
 export PATH=/sbin:/usr/sbin:/bin:/usr/bin
@@ -45,14 +45,15 @@ if [ -c /dev/spidev0.0 ]; then say spi ok "/dev/spidev0.0"
 elif [ "$starting" = 1 ]; then say spi warn "not enabled yet (the Air unit started ${up} s ago)"
 else say spi fail "SPI0 to the radio controller is not enabled (/etc/luckfox.cfg SPI0_M0_STATUS=1): write the image again"; fi
 
-# 3. the radio controller's firmware update over SWD (at boot, when the image carries other firmware)
+# 3. the radio controller's firmware update over SPI or SWD (at boot, when the image carries other firmware)
 want=$(md5sum <"$share/rp2354.elf" 2>/dev/null | cut -d' ' -f1)
 have=$(cat "$dir/rp2354.flashed" 2>/dev/null)
-last=$(vtx | grep -E '^EVENT rp2354_flash (start|ok)|^ERROR rp2354_flash|DPIDR' | tail -3)
+last=$(vtx | grep -E '^EVENT rp2354_flash (spi start|start|ok)|^ERROR rp2354_flash|DPIDR' | tail -3)
 if echo "$last" | tail -1 | grep -q '^ERROR rp2354_flash'; then
     if echo "$last" | grep -q DPIDR; then say swd fail "the radio controller answered over SWD, but writing its firmware failed: restart to retry"
     else say swd fail "no answer from the radio controller (RP2354A) over SWD: its power, or the SWD lines (Luckfox pins 9, 10)"; fi
-elif echo "$last" | tail -1 | grep -q '^EVENT rp2354_flash start'; then say swd warn "updating the radio controller now (about 20 s)"
+elif echo "$last" | tail -1 | grep -q '^EVENT rp2354_flash spi start'; then say swd warn "updating the radio controller now (a few seconds)"
+elif echo "$last" | tail -1 | grep -q '^EVENT rp2354_flash start'; then say swd warn "updating the radio controller now over SWD (about 20 s)"
 elif [ -n "$have" ] && [ "$have" = "$want" ]; then say swd ok "radio controller firmware up to date"; swd_current=1
 else say swd warn "radio controller not updated yet (it is at the next start)"; fi
 

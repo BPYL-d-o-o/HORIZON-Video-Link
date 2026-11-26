@@ -1,0 +1,18 @@
+[Unit]
+Description=Horizon video link transmitter (Pi camera -> x265 -> Horizon HAT over SPI)
+
+[Service]
+User=horizon
+WorkingDirectory=/opt/horizon
+# control FIFO for TX power changes while running (tx_power.sh): /run/horizon_vtx/ctl
+RuntimeDirectory=horizon_vtx
+RuntimeDirectoryMode=0775
+Environment=HORIZON_VTX_CTL=/run/horizon_vtx/ctl
+# extra hz_vtx options, e.g. HORIZON_VTX_ARGS="--tx-power -19" (/opt/horizon/hz_vtx --help)
+EnvironmentFile=-/etc/default/horizon_vtx
+ExecStart=/opt/horizon/hz_vtx $HORIZON_VTX_ARGS
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

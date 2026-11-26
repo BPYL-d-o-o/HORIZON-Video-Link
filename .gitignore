@@ -1,7 +1,6 @@
 # ---- build outputs (rebuild from source)
-lora_vlink/build/
-luckfox_vtx/build/
-pi5_vtx/frame_enc
+radio_firmware/build/
+transmitter/build/
 
 # ---- Python environments and packaged apps
 .venv/
@@ -13,7 +12,6 @@ __pycache__/
 logs/
 *.log
 *.rxlog
-pi5_vtx/headers.bin
 LoRaVideoRX/
 HorizonReceiver/
 

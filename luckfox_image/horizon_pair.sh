@@ -11,7 +11,7 @@
 #                                       -> K saved ... applied=1   (or C fail <why>)
 #   S                                   -> the self-check (horizon_check.sh): CHECK <part> ok|warn|fail <text> lines,
 #                                          then CHECK result=PASS|WARN|FAIL
-#   T                                   -> factory test of the SPI link to the RP2354A at the transmitter's clock
+#   T                                   -> test of the SPI link to the RP2354A at the transmitter's clock
 #                                          (spi_speed_test; the transmitter stops for ~10 s): T EVENT ... lines, then
 #                                          T RESULT PASS|FAIL
 #   U <base64_bytes> <sha256>           update (horizon_update.sh): -> U ready; then exactly <base64_bytes> characters of
@@ -69,9 +69,8 @@ save() {  # hz n step pwr [call]
     fi
     mv "$conf.new" "$conf" && sync
     logger -t horizon_pair "saved: HZ_ARGS=\"$new\""
-    # restart and wait until hz_vtx reports the plan in use (it sends it to the RP2354A at start): first its identity
-    # file, written anew at every start, then the plan line among the latest log lines (the syslog rotates, so not
-    # by line number)
+    # restart and wait until hz_vtx reports the plan in use: its identity file (written anew at every start), then the
+    # plan line among the latest log lines (the syslog rotates, so not by line number)
     rm -f /run/hz_vtx.id
     sh "$dir/service.sh" restart >/dev/null 2>&1
     i=0 applied=0

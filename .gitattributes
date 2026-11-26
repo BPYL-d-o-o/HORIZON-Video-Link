@@ -5,3 +5,6 @@ tools/git-hooks/* text eol=lf
 luckfox_image/** text eol=lf
 *.cmd text eol=crlf
 *.bat text eol=crlf
+# CI scripts and data run in Linux (WSL): LF even in a Windows checkout
+tools/ci/* text eol=lf
+.github/** text eol=lf

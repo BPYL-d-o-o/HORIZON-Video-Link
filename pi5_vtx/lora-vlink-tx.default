@@ -1,7 +1,0 @@
-# /etc/default/lora-vlink-tx: options for live_sender.py when it runs as lora-vlink-tx.service
-# (sudo systemctl restart lora-vlink-tx to apply). See: python3 pi5_vtx/live_sender.py --help
-#   --link auto|spi|usb    how the Pi reaches the TX RP2350 (default auto: SPI if it answers there, else USB)
-#   --serial PORT          the TX RP2350's USB port when several Picos are plugged in (/dev/serial/by-id/... or sn:<id>)
-#   --tx-power N           TX power at start, 0.5 dBm units: -19 (-9.5 dBm) .. 44 (22 dBm); default: keep the
-#                          RP2350's boot value. tx_power.sh N save writes it here.
-LORA_TX_ARGS=""

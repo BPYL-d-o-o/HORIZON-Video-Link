@@ -16,7 +16,8 @@ Set up and flash the hardware from the browser at **https://horizon.bpyl.si/** (
 | --- | --- |
 | Air unit, Horizon Dev Air | Luckfox Pico (RV1103) camera board with an RP2354 radio controller and an LR2021 module |
 | Air unit, Raspberry Pi 5 | A Pi 5 with a camera and the Horizon HAT (RP2350 + LR2021) |
-| Ground | Horizon Dev Ground: RP2350 + LR2021 USB receiver |
+| Ground, Horizon Dev Ground Unit | USB receiver: RP2354 + Seeed Wio-LR2021 module, one SMA port per band (sub-GHz, 2.4 GHz) |
+| Ground, Horizon HAT | The same HAT as the Pi 5 Air unit, with the receiver firmware: plugged into the computer by its own USB port, no Pi needed. Which role it has depends only on the firmware the setup site puts on it |
 
 Radio: LoRa SF5, 1 MHz, sub-GHz (150–960 MHz) or 2.4 GHz with frequency hopping. Every packet carries a CRC keyed
 with the pair's link ID (from the callsign), Reed-Solomon repair inside the packet, and block FEC across packets
@@ -26,17 +27,37 @@ with the pair's link ID (from the callsign), Reed-Solomon repair inside the pack
 
 | Folder | Contents |
 | --- | --- |
-| `lora_vlink/src` | RP2350 / RP2354 radio firmware: Air radio controller, Pi HAT transmitter, Ground receiver |
-| `luckfox_vtx` | `hz_vtx`, the transmitter program on the Luckfox (camera, hardware H.265 encoder, packets) |
-| `luckfox_image` | The Luckfox microSD image: build scripts, self-check, pairing, updates |
-| `pi5_vtx`, `pi_image` | The Raspberry Pi 5 transmitter (x265) and its Raspberry Pi OS image; `pi5_vtx/swfec.py` and `blockfec.py` are the reference of the over-the-air format |
+| `radio_firmware/src` | RP235x radio firmware: Air radio controller, Pi HAT transmitter, Ground receivers (Ground Unit, HAT) |
+| `transmitter` | `hz_vtx`, the transmitter program of both Air units: shared core, the Luckfox's camera and hardware H.265 encoder, the Pi's camera and x265 |
+| `luckfox_image` | The Luckfox microSD image: build scripts, the transmitter service, self-check, pairing, updates |
+| `format` | The over-the-air format: how it works (README), its reference code in Python and C |
+| `pi_image` | The Raspberry Pi 5 image (Raspberry Pi OS with `hz_vtx`), its service, and the setup for your own Raspberry Pi OS |
 | `desktop_receiver` | Horizon Receiver for Windows (Rust) |
-| `win_decoder` | Its H.265 decoder, `hz_decoder.dll`: unmodified FFmpeg, reproducible build |
-| `tools` | Build of the Windows app (`build_desktop_app.sh`), factory test |
+| `decoder` | The H.265 decoder: `hz_decoder.dll` of the Windows app (unmodified FFmpeg, reproducible build) |
+| `tools` | Build of the Windows app (`build_desktop_app.sh`) |
+| `test`, `*/test` | The tests: each folder's own in its `test/`, the runner and the end-to-end ones in `test/` |
 
-Builds need Linux or WSL: the Luckfox SDK for the camera side, pico-sdk 2.x for the firmware, MinGW-w64 for the
-decoder, and Rust on Windows for the app. The scripts say what they need at the top. Ready-made firmware, card images
+Builds need Linux or WSL: the Luckfox SDK for the Air's `hz_vtx` (`transmitter/build_luckfox.sh`), pico-sdk 2.x for
+the firmware, MinGW-w64 for the decoder, and Rust on Windows for the app. The Pi's `hz_vtx` builds on the Pi itself
+(`transmitter/build_pi.sh`, or `pi_image/setup_pi.sh` for the whole install). The scripts say what they need at the
+top. Ready-made firmware, card images
 and the Windows app are on the setup site.
+
+## Tests
+
+```sh
+bash test/run.sh            # lists the plugged-in boards, asks what to test
+bash test/run.sh air        # or pi-hat, ground-unit, hat-rx: the device's software, then the device over USB
+bash test/run.sh pair       # factory test: an Air and a Ground over the radio
+bash test/run.sh app        # or site, all: software only, nothing plugged in
+```
+
+A device run builds its firmware and runs the host tests of its software, then finds the board by asking each USB
+serial port who it is and checks it (identity, radio, self-check). Linux, or Git Bash on Windows (the C and Python
+tests and the firmware build then run in WSL). The top of `test/run.sh` lists what each choice runs.
+
+CI (`.github/workflows/ci.yml`) runs `test/run.sh all` and the desktop app's tests on GitHub's runners for every
+push and pull request, and keeps the four firmware builds as artifacts.
 
 ## License
 

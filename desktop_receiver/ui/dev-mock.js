@@ -52,7 +52,7 @@
   function state() {
     const t = now();
     return {
-      ground: { port: 'COM8', error: '', who: [['board', 'vlink'], ['git', 'e7e9218e'], ['fmt', '4']], cfg: { freq_hz: 868000000, pwr_dbm: -9.5, locked: true, hop: null },
+      ground: { port: 'COM8', error: '', who: [['board', 'hat'], ['git', 'e7e9218e'], ['fmt', '4']], cfg: { freq_hz: 868000000, pwr_dbm: -9.5, locked: true, hop: null },
         profile: 'K profile freq_hz=868000000 hop=0,0,0 pwr=-19 saved=1', ident: [t - 95, 'N0CALL'], status: '',
         problems: location.hash.includes('problems') ? ['COM9: Ground firmware 1234abcd is not up to date (this app: e7e9218e): update it on the setup site, Ground page'] : [] },
       recording: null, replay, out_dir: 'C:\\Users\\pilot\\HorizonReceiver', bar: true,

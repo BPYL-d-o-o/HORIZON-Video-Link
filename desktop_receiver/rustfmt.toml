@@ -1,0 +1,2 @@
+# cargo fmt: the Rust code of Horizon Receiver
+max_width = 120

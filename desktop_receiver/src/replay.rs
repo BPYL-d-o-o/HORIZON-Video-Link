@@ -72,7 +72,11 @@ pub fn run(path: PathBuf, state: Arc<Mutex<State>>, cmds: Receiver<Cmd>, mut sin
             (s.playing, s.speed)
         };
         // commands
-        let wait = if playing && pending.is_none() { Duration::from_millis(0) } else { Duration::from_millis(if playing { 2 } else { 50 }) };
+        let wait = if playing && pending.is_none() {
+            Duration::from_millis(0)
+        } else {
+            Duration::from_millis(if playing { 2 } else { 50 })
+        };
         match cmds.recv_timeout(wait) {
             Ok(cmd) => {
                 let mut s = state.lock().unwrap();

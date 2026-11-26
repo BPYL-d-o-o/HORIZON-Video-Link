@@ -1,16 +1,12 @@
-//! Display only ("Hold lost areas"): after a lost packet the decoder paints the parts
-//! of the picture it has no reference for in flat grey, which the transmitter's row refresh repaints within one cycle
-//! (2.7 s at 30 fps). Until then those blocks show the last picture that was on screen instead. The grey also spreads
-//! for a while (later pictures predict from it), so for HOLD_MAX after the latest loss every block that is grey in the
-//! new picture is held, not only those grey right after the loss; a block shows again as soon as it has real picture.
-//! The decoder itself is untouched: this only changes what is shown.
+//! Display only ("Hold lost areas"): after a lost packet the decoder paints what it has no reference for in flat grey
+//! until the row refresh repaints it; those blocks show the last picture on screen instead. The grey spreads for a
+//! while (later pictures predict from it), so for HOLD_MAX after the latest loss every grey block is held.
 use std::time::{Duration, Instant};
 
 const HOLD_MAX: Duration = Duration::from_secs(4);
 const B: usize = 8;
-/// FFmpeg's grey stand-in (YUV 128,128,128) is about 130 in RGB; pictures predicted from it drift darker or lighter
-/// (measured under injected loss: 83 % of the blocks right after a loss at 120-139, and later ones down to 60 and up
-/// to 160). Flat colourless blocks anywhere in this range are taken for it: in clean pictures under 0.03 % are.
+/// FFmpeg's grey stand-in is about 130 in RGB, but pictures predicted from it drift to 60..160. Flat colourless blocks
+/// in this range are rare in clean pictures (under 0.03 %).
 const GREY: std::ops::RangeInclusive<i32> = 60..=160;
 
 #[derive(Default)]
@@ -41,7 +37,6 @@ pub fn flat_grey(px: &[u8], w: usize, bx: usize, by: usize) -> Option<i32> {
 }
 
 /// Is the 8x8 block at (bx, by) the decoder's grey stand-in: flat, mid grey, no colour?
-/// (Measured in the Python app: 0.2 % of the blocks of clean pictures, 44-77 % right after a loss.)
 fn greyish(px: &[u8], w: usize, bx: usize, by: usize) -> bool {
     flat_grey(px, w, bx, by).is_some_and(|g| GREY.contains(&g))
 }

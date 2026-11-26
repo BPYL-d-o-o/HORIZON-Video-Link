@@ -1,21 +1,5 @@
-//! HORIZON over-the-air format v4, receiver side: the Rust twin of setup_site/js/lib/swfec.js (format reference:
-//! pi5_vtx/swfec.py). `engine_check` compares it with the JavaScript one on a capture.
-//!
-//!   radio payload (255 B) = seq16 LE | entry[253]
-//!   entry  0        type    0x00 video, 0xFF filler / command ACK / power announcement,
-//!                           0x02 | (d - 1) << 4 block FEC parity (optional, see below)
-//!          1..2     id16 LE source number (consecutive); parity: the block's first video packet
-//!          3        aux     0; parity: (k - 1) << 4 | j
-//!          4..234   symbol  the next 231 bytes of the video byte stream; parity: parity symbol j
-//!          235..236 CRC-16/MODBUS of entry[0:235], little endian
-//!          237..252 RS(253,237) parity over entry[0:237], GF(256) 0x11d
-//!
-//! A packet that failed the radio CRC is repaired by the Reed-Solomon code and kept only if the CRC-16 matches.
-//! Optional block FEC across packets (pi5_vtx/blockfec.py; transmitters: luckfox_vtx/hz_sched.h, pi5_vtx/swtx.py,
-//! --fec K,M[,D]): after every block of k video packets m parity packets (systematic Cauchy Reed-Solomon over
-//! GF(256) 0x11d); d > 1 interleaves d blocks (block i of a group takes packets i, i+d, ...). While parity is seen, a
-//! lost video packet holds the packets after it until the parity rebuilds it or it can no longer be rebuilt.
-//! Without parity a lost packet is lost.
+//! HORIZON over-the-air format, receiver side (format/README.md): the Rust twin of setup_site/js/lib/swfec.js,
+//! checked against format/packet.py. `engine_check` compares it with the JavaScript one on a capture.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,13 +12,16 @@ const CRC_AT: usize = HDR + SYM;
 pub const FILLER: u8 = 0xff;
 pub const PARITY: u8 = 0x02; // low nibble of a block FEC parity entry's type
 
-// ---- GF(256), polynomial 0x11d
+// GF(256), polynomial 0x11d
 struct Gf {
     exp: [u8; 512],
     log: [u8; 256],
 }
 static GF: std::sync::LazyLock<Gf> = std::sync::LazyLock::new(|| {
-    let mut g = Gf { exp: [0; 512], log: [0; 256] };
+    let mut g = Gf {
+        exp: [0; 512],
+        log: [0; 256],
+    };
     let mut x: u32 = 1;
     for i in 0..255 {
         g.exp[i] = x as u8;
@@ -50,16 +37,25 @@ static GF: std::sync::LazyLock<Gf> = std::sync::LazyLock::new(|| {
     g
 });
 fn gmul(a: u8, b: u8) -> u8 {
-    if a == 0 || b == 0 { 0 } else { GF.exp[GF.log[a as usize] as usize + GF.log[b as usize] as usize] }
+    if a == 0 || b == 0 {
+        0
+    } else {
+        GF.exp[GF.log[a as usize] as usize + GF.log[b as usize] as usize]
+    }
 }
 fn ginv(a: u8) -> u8 {
     GF.exp[255 - GF.log[a as usize] as usize]
 }
 fn gpow(x: u8, p: usize) -> u8 {
-    if p == 0 { 1 } else if x == 0 { 0 } else { GF.exp[(GF.log[x as usize] as usize * p) % 255] }
+    if p == 0 {
+        1
+    } else if x == 0 {
+        0
+    } else {
+        GF.exp[(GF.log[x as usize] as usize * p) % 255]
+    }
 }
 
-// ---- CRC-16/MODBUS
 static CRC16: std::sync::LazyLock<[u16; 256]> = std::sync::LazyLock::new(|| {
     let mut t = [0u16; 256];
     for (i, v) in t.iter_mut().enumerate() {
@@ -78,8 +74,7 @@ pub fn crc16(d: &[u8]) -> u16 {
     }
     c
 }
-/// The entry's CRC-16, keyed with the link ID (format v5, firmware main.c "Link ID": the TX XORs its link into the
-/// CRC; link 0 = format v4). Another system's packets fail it like damaged ones.
+/// The entry's CRC-16, keyed with the link ID (format/README.md "Link ID"; 0 = unkeyed).
 fn crc_ok(e: &[u8], link: u16) -> bool {
     crc16(&e[..CRC_AT]) ^ link == (e[CRC_AT] as u16 | (e[CRC_AT + 1] as u16) << 8)
 }
@@ -90,13 +85,16 @@ pub fn recording_link(path: &std::path::Path) -> Option<u16> {
     for line in std::io::BufReader::new(f).lines().take(20000) {
         let line = line.ok()?;
         if let Some(i) = line.find("C cfg ") {
-            return line[i..].split_whitespace().find_map(|kv| kv.strip_prefix("link=")).and_then(|v| v.parse().ok());
+            return line[i..]
+                .split_whitespace()
+                .find_map(|kv| kv.strip_prefix("link="))
+                .and_then(|v| v.parse().ok());
         }
     }
     None
 }
 
-// ---- Reed-Solomon RS(253,237): errors and erasures (as swfec.py / swfec.js)
+// RS(253,237): errors and erasures
 fn poly_mul(p: &[u8], q: &[u8]) -> Vec<u8> {
     let mut r = vec![0u8; p.len() + q.len() - 1];
     for (j, &qj) in q.iter().enumerate() {
@@ -179,8 +177,15 @@ fn error_locator(synd: &[u8], nsym: usize, erase_count: usize) -> Option<Vec<u8>
 }
 fn find_errors(err_loc: &[u8], n: usize) -> Option<Vec<usize>> {
     let errs = err_loc.len() - 1;
-    let pos: Vec<usize> = (0..n).filter(|&i| poly_eval(err_loc, gpow(2, i)) == 0).map(|i| n - 1 - i).collect();
-    if pos.len() == errs { Some(pos) } else { None }
+    let pos: Vec<usize> = (0..n)
+        .filter(|&i| poly_eval(err_loc, gpow(2, i)) == 0)
+        .map(|i| n - 1 - i)
+        .collect();
+    if pos.len() == errs {
+        Some(pos)
+    } else {
+        None
+    }
 }
 fn correct_errata(cw: &[u8], synd: &[u8], err_pos: &[usize]) -> Option<Vec<u8>> {
     let n = cw.len();
@@ -242,8 +247,7 @@ pub fn rs_decode(cw: &[u8], erasures: &[usize]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// ---- optional block FEC across packets (blockfec.py): systematic Cauchy Reed-Solomon over GF(256) 0x11d
-/// Cauchy matrix entry, parity row j, source column i: 1 / ((k + j) xor i) (never 0: i < k).
+/// Block FEC Cauchy matrix entry, parity row j, source column i: 1 / ((k + j) xor i) (never 0: i < k).
 fn cauchy(k: usize, j: usize, i: usize) -> u8 {
     ginv(((k + j) ^ i) as u8)
 }
@@ -296,7 +300,10 @@ pub fn bfec_decode(k: usize, have: &[(usize, &[u8])], parity: &[(usize, &[u8])])
             acc
         })
         .collect();
-    let mut a: Vec<Vec<u8>> = rows.iter().map(|r| miss.iter().map(|&i| cauchy(k, r.0, i)).collect()).collect();
+    let mut a: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|r| miss.iter().map(|&i| cauchy(k, r.0, i)).collect())
+        .collect();
     // Gauss-Jordan over GF(256)
     for col in 0..n {
         let piv = (col..n).find(|&r| a[r][col] != 0)?;
@@ -323,12 +330,11 @@ pub fn bfec_decode(k: usize, have: &[(usize, &[u8])], parity: &[(usize, &[u8])])
     Some(miss.into_iter().zip(rhs).collect())
 }
 
-// ---- entries
 /// The TX RP2350's own packets: idle filler (FF FF FF), command ACK / power announcement (FF FF FE).
 pub fn is_filler(e: &[u8]) -> bool {
     e[0] == FILLER && e[1] == 0xff && (e[2] == 0xff || e[2] == 0xfe)
 }
-/// The Air status the TX radio puts into its idle packets (firmware main.c, "Air status"): why there is no video.
+/// The Air status in the TX's idle packets (radio_firmware/src/common.h "Air status"): why there is no video.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AirStatus {
     /// AIR_* below
@@ -349,7 +355,7 @@ pub const AIR_SILENT: u8 = 3;
 pub const AIR_NO_HOST: u8 = 4;
 pub const AIR_STOPPING: u8 = 5;
 pub const AIR_ERROR: u8 = 6;
-/// The Air status in an idle entry, if it carries one (older TX firmware sends zeros there).
+/// The Air status in an idle entry, if it carries one.
 pub fn air_status(e: &[u8]) -> Option<AirStatus> {
     if e.len() < 21 || e[0..3] != [0xff, 0xff, 0xff] || e[3..6] != [b'H', b'S', 1] {
         return None;
@@ -379,10 +385,14 @@ pub fn repair_entry(e: &[u8], link: u16) -> Option<Vec<u8>> {
         return Some(e.to_vec());
     }
     let out = rs_decode(e, &[])?;
-    if crc_ok(&out, link) { Some(out) } else { None }
+    if crc_ok(&out, link) {
+        Some(out)
+    } else {
+        None
+    }
 }
 
-// ---- byte stream -> access units
+// byte stream -> access units
 const AUD: [u8; 7] = [0, 0, 0, 1, 0x46, 0x01, 0x50];
 
 fn au_start(d: &[u8]) -> bool {
@@ -428,7 +438,13 @@ struct PathSplitter {
 }
 impl PathSplitter {
     fn new() -> Self {
-        PathSplitter { buf: Vec::with_capacity(65536), skip: true, after_gap: true, fresh: false, dropped: 0 }
+        PathSplitter {
+            buf: Vec::with_capacity(65536),
+            skip: true,
+            after_gap: true,
+            fresh: false,
+            dropped: 0,
+        }
     }
     fn start_at_boundary(&mut self) {
         self.buf.clear();
@@ -479,23 +495,22 @@ impl PathSplitter {
 
 /// Checked entries in, access units out.
 ///
-/// Optional block FEC: while parity is seen, a lost video packet does not cut the stream at
-/// once. The packets after it are held until the block's parity rebuilds it (then everything is delivered in order, as
-/// if nothing was lost), or until it can no longer be rebuilt (a later block's parity arrived, or FEC_GIVEUP packets
-/// went by): then it is delivered as a gap, as without FEC. Without parity packets nothing is held.
+/// While block FEC parity is seen, the packets after a lost video packet are held until the parity rebuilds it, or
+/// until it can no longer be rebuilt (a later block's parity arrived, or FEC_GIVEUP packets went by): then it is
+/// delivered as a gap. Without parity packets nothing is held.
 pub struct Stream {
     next: Option<i64>,
     split: PathSplitter,
-    fec_last: Option<i64>,                       // source id when the last parity packet arrived
-    src: BTreeMap<i64, Vec<u8>>,                 // recent video symbols (for rebuilding)
-    par: BTreeMap<(i64, usize), ParBlock>,       // (first id of a block, d) -> its parity
-    missing: BTreeSet<i64>,                      // lost video packets that may still be rebuilt
-    held: BTreeMap<i64, Vec<u8>>,                // received or rebuilt, waiting behind a missing one
-    giveup_below: Option<i64>,                   // missing ids below this can no longer be rebuilt
+    fec_last: Option<i64>,                 // source id when the last parity packet arrived
+    src: BTreeMap<i64, Vec<u8>>,           // recent video symbols (for rebuilding)
+    par: BTreeMap<(i64, usize), ParBlock>, // (first id of a block, d) -> its parity
+    missing: BTreeSet<i64>,                // lost video packets that may still be rebuilt
+    held: BTreeMap<i64, Vec<u8>>,          // received or rebuilt, waiting behind a missing one
+    giveup_below: Option<i64>,             // missing ids below this can no longer be rebuilt
     giveup_n: i64,
     /// video packets rebuilt by the block FEC (total, kept across resyncs)
     pub recovered: u64,
-    /// the link ID packets are checked with (from the receiver's "C cfg ... link=N"; 0 = format v4)
+    /// the link ID packets are checked with (from the receiver's "C cfg ... link=N"; 0 = unkeyed)
     pub link: u16,
 }
 struct ParBlock {
@@ -526,7 +541,11 @@ impl Stream {
     fn reset(&mut self) {
         let recovered = self.recovered;
         let link = self.link;
-        *self = Stream { recovered, link, ..Stream::default() };
+        *self = Stream {
+            recovered,
+            link,
+            ..Stream::default()
+        };
     }
     fn unwrap_id(&self, id16: i64) -> i64 {
         let next = self.next.unwrap_or(0);
@@ -541,7 +560,11 @@ impl Stream {
         let first = self.unwrap_id(e[1] as i64 | (e[2] as i64) << 8);
         let (k, j, d) = ((e[3] >> 4) as usize + 1, (e[3] & 15) as usize, (e[0] >> 4) as usize + 1);
         self.fec_last = Some(next);
-        let b = self.par.entry((first, d)).or_insert_with(|| ParBlock { k, d, p: BTreeMap::new() });
+        let b = self.par.entry((first, d)).or_insert_with(|| ParBlock {
+            k,
+            d,
+            p: BTreeMap::new(),
+        });
         b.p.insert(j, e[HDR..HDR + SYM].to_vec());
         let jmax = *b.p.keys().next_back().unwrap() as i64;
         // how long a lost packet may wait for its parity: about one group (d interleaved blocks of k + m packets)
@@ -560,10 +583,15 @@ impl Stream {
         if nmiss == 0 || nmiss > b.p.len() {
             return;
         }
-        let have: Vec<(usize, &[u8])> =
-            ids.iter().enumerate().filter_map(|(n, s)| self.src.get(s).map(|v| (n, v.as_slice()))).collect();
+        let have: Vec<(usize, &[u8])> = ids
+            .iter()
+            .enumerate()
+            .filter_map(|(n, s)| self.src.get(s).map(|v| (n, v.as_slice())))
+            .collect();
         let parity: Vec<(usize, &[u8])> = b.p.iter().map(|(j, v)| (*j, v.as_slice())).collect();
-        let Some(r) = bfec_decode(b.k, &have, &parity) else { return };
+        let Some(r) = bfec_decode(b.k, &have, &parity) else {
+            return;
+        };
         for (i, sym) in r {
             let s = ids[i];
             self.src.insert(s, sym.clone());
@@ -678,7 +706,7 @@ impl Stream {
     }
 }
 
-// ---- access unit -> what the decoder gets
+// access unit -> what the decoder gets
 const STAMP: [u8; 6] = [0, 0, 0, 1, 0x60, 0x01];
 /// Annex-B bytes for the decoder (the transmitter's timestamp NAL removed) and that timestamp (µs, TX clock).
 pub fn prepare_au(au: &[u8]) -> Option<(Vec<u8>, Option<u64>)> {
@@ -711,9 +739,11 @@ pub fn prepare_au(au: &[u8]) -> Option<(Vec<u8>, Option<u64>)> {
     Some((data, sent_us))
 }
 
-// ---- receiver serial lines (lora_vlink/src/main.c) -> stream + statistics
+// receiver serial lines (radio_firmware/src/rx.c) -> stream + statistics
 fn hex(s: &str) -> Vec<u8> {
-    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0)).collect()
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap_or(0))
+        .collect()
 }
 
 /// A received packet's radio measurements (the receiver's P / E line).
@@ -735,12 +765,28 @@ pub enum Line {
     /// crc_failed (the radio's CRC failed: an E line), video (a video entry went to the stream)
     /// air: the Air status an idle packet carries; foreign: the link ID of another system's packet (received intact,
     /// keyed with another link: dropped)
-    Packet { ok: bool, filler: bool, repaired: bool, crc_failed: bool, video: bool, radio: Radio, air: Option<AirStatus>, foreign: Option<u16> },
+    Packet {
+        ok: bool,
+        filler: bool,
+        repaired: bool,
+        crc_failed: bool,
+        video: bool,
+        radio: Radio,
+        air: Option<AirStatus>,
+        foreign: Option<u16>,
+    },
     /// a slot without a packet; noise = channel RSSI measured in it (dBm)
-    Miss { noise: Option<f32> },
+    Miss {
+        noise: Option<f32>,
+    },
     /// the receiver's configuration (once a second)
     /// hop: (channels, spacing in Hz), one packet per channel
-    Cfg { freq_hz: u64, pwr_dbm: f32, locked: bool, hop: Option<(u32, u64)> },
+    Cfg {
+        freq_hz: u64,
+        pwr_dbm: f32,
+        locked: bool,
+        hop: Option<(u32, u64)>,
+    },
     /// "W": who the receiver is (key=value pairs)
     Who(Vec<(String, String)>),
     /// "K": the pairing profile it keeps (the raw line)
@@ -785,7 +831,16 @@ pub fn line(text: &str, stream: &mut Stream, sink: &mut dyn StreamSink, idents: 
                 let l = u16::from_le_bytes([raw[21], raw[22]]);
                 l == 0 || l == stream.link // (0: firmware without the link in it)
             });
-            return Line::Packet { ok: true, filler: true, repaired: false, crc_failed, video: false, radio, air, foreign: None };
+            return Line::Packet {
+                ok: true,
+                filler: true,
+                repaired: false,
+                crc_failed,
+                video: false,
+                radio,
+                air,
+                foreign: None,
+            };
         }
         let (e, repaired) = if c == b'P' && check_entry(raw, stream.link) {
             (Some(raw.to_vec()), false)
@@ -795,23 +850,44 @@ pub fn line(text: &str, stream: &mut Stream, sink: &mut dyn StreamSink, idents: 
             (r, ok)
         };
         let Some(e) = e else {
-            // the radio's CRC passed and the Reed-Solomon code finds no error, yet our keyed CRC fails: an intact packet
-            // keyed with another link ID, i.e. another system's (its CRC then tells which link)
+            // radio CRC passed, RS finds no error, keyed CRC fails: another system's intact packet
             let foreign = (c == b'P' && rs_decode(raw, &[]).is_some_and(|o| o.as_slice() == raw))
                 .then(|| crc16(&raw[..CRC_AT]) ^ (raw[CRC_AT] as u16 | (raw[CRC_AT + 1] as u16) << 8));
-            return Line::Packet { ok: false, filler: false, repaired: false, crc_failed, video: false, radio, air: None, foreign };
+            return Line::Packet {
+                ok: false,
+                filler: false,
+                repaired: false,
+                crc_failed,
+                video: false,
+                radio,
+                air: None,
+                foreign,
+            };
         };
         let filler = e[0] == FILLER;
         let video = e[0] == 0;
         if !filler {
             stream.entry(&e, sink);
         }
-        return Line::Packet { ok: true, filler, repaired, crc_failed, video, radio, air: None, foreign: None };
+        return Line::Packet {
+            ok: true,
+            filler,
+            repaired,
+            crc_failed,
+            video,
+            radio,
+            air: None,
+            foreign: None,
+        };
     }
     if c == b'M' {
         // "M seq ch reason noise_half_dbm"
         let p: Vec<&str> = text.split(' ').collect();
-        let noise = p.get(4).and_then(|v| v.parse::<f32>().ok()).filter(|v| *v != 9999.0).map(|v| v / 2.0);
+        let noise = p
+            .get(4)
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v != 9999.0)
+            .map(|v| v / 2.0);
         return Line::Miss { noise };
     }
     if let Some(rest) = text.strip_prefix("C cfg ") {
@@ -834,7 +910,12 @@ pub fn line(text: &str, stream: &mut Stream, sink: &mut dyn StreamSink, idents: 
                 _ => {}
             }
         }
-        return Line::Cfg { freq_hz, pwr_dbm: pwr, locked, hop };
+        return Line::Cfg {
+            freq_hz,
+            pwr_dbm: pwr,
+            locked,
+            hop,
+        };
     }
     if c == b'W' {
         let kv = text[2..]
@@ -863,7 +944,7 @@ pub fn line(text: &str, stream: &mut Stream, sink: &mut dyn StreamSink, idents: 
     Line::Other
 }
 
-// ---- identification (callsign) blob, as swfec.py encode_call / decode_call
+// callsign blob, as format/packet.py encode_call / decode_call
 const CALL_ALPHA: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/- ";
 pub const CALL_TEXT_MAX: usize = 32;
 
@@ -897,7 +978,11 @@ pub fn encode_call(text: &str) -> Result<Vec<u8>, String> {
 fn decode_call(blob: &[u8]) -> Option<String> {
     let first = *blob.first()?;
     let n = (first & 0x7f) as usize;
-    let len = if first & 0x80 != 0 { 1 + 2 * ((n + 2) / 3) } else { 1 + n };
+    let len = if first & 0x80 != 0 {
+        1 + 2 * ((n + 2) / 3)
+    } else {
+        1 + n
+    };
     if len > blob.len() {
         return None;
     }
@@ -911,7 +996,11 @@ fn decode_call(blob: &[u8]) -> Option<String> {
         let w = blob[i] as u32 | (blob[i + 1] as u32) << 8;
         for c in [w / 1600, (w / 40) % 40, w % 40] {
             if c > 0 {
-                out.push(if (c as usize) <= alpha.len() { alpha[c as usize - 1] } else { '?' });
+                out.push(if (c as usize) <= alpha.len() {
+                    alpha[c as usize - 1]
+                } else {
+                    '?'
+                });
             }
         }
         i += 2;
@@ -929,7 +1018,9 @@ pub struct IdentAssembler {
 }
 impl IdentAssembler {
     pub fn add(&mut self, seq: u32, part: u32, parts: u32, data: &[u8]) -> Option<String> {
-        let stale = self.last_seq.is_some_and(|l| (seq.wrapping_sub(l) & 0xffff) > 64 * (parts + 1));
+        let stale = self
+            .last_seq
+            .is_some_and(|l| (seq.wrapping_sub(l) & 0xffff) > 64 * (parts + 1));
         if self.n != Some(parts) || stale || part == 0 {
             self.parts.clear();
         }
@@ -939,282 +1030,14 @@ impl IdentAssembler {
         if self.parts.len() as u32 != parts {
             return None;
         }
-        let blob: Vec<u8> = (0..parts).flat_map(|i| self.parts.get(&i).cloned().unwrap_or_default()).collect();
+        let blob: Vec<u8> = (0..parts)
+            .flat_map(|i| self.parts.get(&i).cloned().unwrap_or_default())
+            .collect();
         self.parts.clear();
         decode_call(&blob)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn callsign_round_trip() {
-        for call in ["S59ABC/P", "N0CALL", "AB1"] {
-            let blob = encode_call(call).unwrap();
-            let mut ia = IdentAssembler::default();
-            let (a, b) = blob.split_at(blob.len() / 2);
-            assert_eq!(ia.add(10, 0, 2, a), None);
-            assert_eq!(ia.add(11, 1, 2, b).as_deref(), Some(call));
-        }
-    }
-
-    #[test]
-    fn rs_repairs_eight_errors() {
-        // a valid entry: CRC, then parity from a systematic encoder (as check_swfec.mjs builds them)
-        let mut g = vec![1u8];
-        for i in 0..RS_PAR {
-            g = poly_mul(&g, &[1, GF.exp[i]]);
-        }
-        let mut e = vec![0u8; ENTRY];
-        for (i, v) in e.iter_mut().enumerate().take(HDR + SYM).skip(HDR) {
-            *v = (i * 37 % 251) as u8;
-        }
-        let c = crc16(&e[..CRC_AT]);
-        e[CRC_AT] = c as u8;
-        e[CRC_AT + 1] = (c >> 8) as u8;
-        let mut r = vec![0u8; RS_PAR];
-        for &b in &e[..CRC_AT + 2] {
-            let f = b ^ r[0];
-            r.remove(0);
-            r.push(0);
-            for j in 0..RS_PAR {
-                r[j] ^= gmul(g[j + 1], f);
-            }
-        }
-        e[CRC_AT + 2..].copy_from_slice(&r);
-        assert!(check_entry(&e, 0));
-        let mut d = e.clone();
-        for k in 0..8 {
-            d[k * 29 + 3] ^= 0x5a;
-        }
-        assert_eq!(repair_entry(&d, 0).unwrap(), e);
-    }
-
-    // ---- block FEC
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-        fn below(&mut self, n: usize) -> usize {
-            (self.next() % n as u64) as usize
-        }
-        fn bytes(&mut self, n: usize) -> Vec<u8> {
-            (0..n).map(|_| self.next() as u8).collect()
-        }
-        /// n distinct values below `of`
-        fn pick(&mut self, n: usize, of: usize) -> Vec<usize> {
-            let mut v: Vec<usize> = (0..of).collect();
-            for i in 0..n {
-                let j = i + self.below(of - i);
-                v.swap(i, j);
-            }
-            v.truncate(n);
-            v
-        }
-    }
-
-    #[test]
-    fn block_fec_round_trip_with_erasures() {
-        let mut rng = Rng(0x9e3779b97f4a7c15);
-        for &(k, m) in &[(16, 2), (12, 3), (8, 2), (1, 1), (16, 16), (5, 4), (3, 16)] {
-            for _ in 0..30 {
-                let src: Vec<Vec<u8>> = (0..k).map(|_| rng.bytes(SYM)).collect();
-                let refs: Vec<&[u8]> = src.iter().map(|v| v.as_slice()).collect();
-                let par = bfec_encode(&refs, m);
-                // lose up to m of the k + m packets, any mix of video and parity
-                let nlose = 1 + rng.below(m);
-                let lose = rng.pick(nlose, k + m);
-                let have: Vec<(usize, &[u8])> = (0..k).filter(|i| !lose.contains(i)).map(|i| (i, src[i].as_slice())).collect();
-                let pk: Vec<(usize, &[u8])> = (0..m).filter(|j| !lose.contains(&(k + j))).map(|j| (j, par[j].as_slice())).collect();
-                let got = bfec_decode(k, &have, &pk).expect("decodable");
-                let want: Vec<usize> = (0..k).filter(|i| lose.contains(i)).collect();
-                assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), want);
-                for (i, v) in got {
-                    assert_eq!(v, src[i], "k={k} m={m} lost {lose:?}");
-                }
-            }
-            // one more loss than parity: not decodable
-            let src: Vec<Vec<u8>> = (0..k).map(|_| rng.bytes(SYM)).collect();
-            let refs: Vec<&[u8]> = src.iter().map(|v| v.as_slice()).collect();
-            let par = bfec_encode(&refs, m);
-            if m < k {
-                let have: Vec<(usize, &[u8])> = (m + 1..k).map(|i| (i, src[i].as_slice())).collect();
-                let pk: Vec<(usize, &[u8])> = (0..m).map(|j| (j, par[j].as_slice())).collect();
-                assert!(bfec_decode(k, &have, &pk).is_none());
-            }
-        }
-        // the Pi's blockfec.py / the Luckfox's hz_fec.h matrix: C[j][i] = 1 / ((k + j) xor i); k = 2, m = 1, sources
-        // [1], [2]: parity = 1/(2^0) * 1 ^ 1/(2^1) * 2 = ginv(2) ^ gmul(ginv(3), 2)
-        let p = bfec_encode(&[&[1u8][..], &[2u8][..]], 1);
-        assert_eq!(p[0], vec![ginv(2) ^ gmul(ginv(3), 2)]);
-    }
-
-    fn entry_of(typ: u8, id: u32, aux: u8, sym: &[u8]) -> Vec<u8> {
-        let mut e = vec![0u8; ENTRY];
-        e[0] = typ;
-        e[1] = id as u8;
-        e[2] = (id >> 8) as u8;
-        e[3] = aux;
-        e[HDR..HDR + sym.len()].copy_from_slice(sym);
-        let c = crc16(&e[..CRC_AT]);
-        e[CRC_AT] = c as u8;
-        e[CRC_AT + 1] = (c >> 8) as u8;
-        e
-    }
-
-    /// Transmitter as hz_sched.h / swtx.py: the byte stream in 231-byte symbols; groups of `sizes[g]` video packets
-    /// (k * d, or fewer: a group closed early), the parity of its d interleaved blocks after it.
-    fn tx(stream: &[u8], m: usize, d: usize, sizes: &mut dyn FnMut() -> usize) -> Vec<Vec<u8>> {
-        let syms: Vec<Vec<u8>> = stream.chunks(SYM).map(|c| { let mut v = c.to_vec(); v.resize(SYM, 0); v }).collect();
-        let mut out = Vec::new();
-        let mut id = 0usize;
-        while id < syms.len() {
-            let n = sizes().min(syms.len() - id);
-            for (i, s) in syms[id..id + n].iter().enumerate() {
-                out.push(entry_of(0, (id + i) as u32, 0, s));
-            }
-            for b in 0..d.min(n) {
-                let blk: Vec<&[u8]> = (b..n).step_by(d).map(|i| syms[id + i].as_slice()).collect();
-                for (j, p) in bfec_encode(&blk, m).iter().enumerate() {
-                    out.push(entry_of(PARITY | ((d - 1) << 4) as u8, (id + b) as u32, ((blk.len() - 1) << 4 | j) as u8, p));
-                }
-            }
-            id += n;
-        }
-        out
-    }
-
-    #[derive(Default)]
-    struct Got {
-        aus: Vec<Vec<u8>>,
-        gaps: usize,
-        lost: u64,
-        recovered: u64,
-    }
-    impl StreamSink for Got {
-        fn au(&mut self, au: Vec<u8>, after_gap: bool) {
-            self.gaps += after_gap as usize;
-            self.aus.push(au);
-        }
-        fn source(&mut self, lost: bool) {
-            self.lost += lost as u64;
-        }
-        fn event(&mut self, _: String) {}
-        fn recovered(&mut self) {
-            self.recovered += 1;
-        }
-    }
-
-    fn make_aus(n: usize, rng: &mut Rng) -> Vec<Vec<u8>> {
-        (0..n)
-            .map(|i| {
-                let mut a = vec![0, 0, 0, 1, 2, 1, 1 + (i / 255 % 255) as u8, 1 + (i % 255) as u8];
-                let len = 60 + rng.below(640);
-                a.extend((0..len).map(|_| 1 + rng.below(255) as u8)); // no zeros: no false start codes
-                a
-            })
-            .collect()
-    }
-
-    fn run(entries: &[Vec<u8>], drop: &mut dyn FnMut(usize, &[u8]) -> bool) -> (Got, u64) {
-        let mut st = Stream::default();
-        let mut g = Got::default();
-        for (n, e) in entries.iter().enumerate() {
-            if !drop(n, e) {
-                st.entry(e, &mut g);
-            }
-        }
-        st.entry(&entry_of(FILLER, 0xffff, 0xff, &[]), &mut g);
-        (g, st.recovered)
-    }
-
-    #[test]
-    fn block_fec_stream_recovers_losses() {
-        let mut rng = Rng(12345);
-        let aus = make_aus(400, &mut rng);
-        let mut stream = Vec::new();
-        for a in &aus {
-            stream.extend_from_slice(a);
-            stream.extend_from_slice(&AUD);
-        }
-        // the AUD that ends the last AU is in the stream: every AU comes out
-        let ents = tx(&stream, 2, 1, &mut || 16);
-        let (g, rec) = run(&ents, &mut |_, _| false);
-        assert_eq!(g.aus, aus);
-        assert_eq!((g.lost, rec), (0, 0));
-
-        // groups closed early (random sizes 1..16) and two losses in every block after the first two (until the first
-        // parity arrives the receiver cannot know FEC is on)
-        let mut r2 = Rng(77);
-        let ents = tx(&stream, 2, 1, &mut || 1 + r2.below(16));
-        let mut r3 = Rng(99);
-        let mut block_of = Vec::new(); // block number per entry
-        let mut b = 0usize;
-        for (n, e) in ents.iter().enumerate() {
-            if n > 0 && e[0] == 0 && ents[n - 1][0] != 0 {
-                b += 1;
-            }
-            block_of.push(b);
-        }
-        let mut lost_in: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (n, &blk) in block_of.iter().enumerate() {
-            lost_in.entry(blk).or_default().push(n);
-        }
-        let mut drop_set = BTreeSet::new();
-        for (blk, idx) in &lost_in {
-            if *blk >= 2 && idx.len() >= 3 {
-                for p in r3.pick(2, idx.len()) {
-                    drop_set.insert(idx[p]);
-                }
-            }
-        }
-        let (g, rec) = run(&ents, &mut |n, _| drop_set.contains(&n));
-        assert_eq!(g.aus, aus, "two losses per block, early-closed blocks");
-        assert_eq!(g.gaps, 1, "only the very first AU is after a gap");
-        assert_eq!(g.lost, 0);
-        assert!(rec > 50, "rebuilt {rec}");
-        assert_eq!(g.recovered, rec);
-        // the same with ids that wrap past 65535 (the receiver starts inside the stream: the first AU is not complete)
-        let wrapped: Vec<Vec<u8>> = ents
-            .iter()
-            .map(|e| {
-                let id = (e[1] as u32 | (e[2] as u32) << 8) + 65000;
-                let mut w = e.clone();
-                w[1] = id as u8;
-                w[2] = (id >> 8) as u8;
-                w
-            })
-            .collect();
-        let (g, rec2) = run(&wrapped, &mut |n, _| drop_set.contains(&n));
-        assert_eq!(g.aus[..], aus[1..], "ids wrapping past 65535");
-        assert_eq!(rec2, rec);
-
-        // interleaved 8+2 x3: a fade of 6 packets in a row in every group (24 video + 6 parity) is rebuilt
-        let ents = tx(&stream, 2, 3, &mut || 24);
-        let mut r4 = Rng(5);
-        let starts: Vec<usize> = (0..ents.len() / 30 + 1).map(|_| r4.below(19)).collect();
-        let fade = |n: usize| n / 30 >= 2 && (starts[n / 30]..starts[n / 30] + 6).contains(&(n % 30));
-        let (g, rec) = run(&ents, &mut |n, _| fade(n));
-        assert_eq!(g.aus, aus, "interleaved fades");
-        assert!(rec > 0 && g.lost == 0);
-
-        // more losses than the code corrects: only the AUs touched are lost, none is corrupted, the stream goes on
-        let ents = tx(&stream, 2, 1, &mut || 8);
-        let mut r5 = Rng(31337);
-        let (g, rec) = run(&ents, &mut |_, _| r5.below(10) == 0);
-        assert!(g.aus.iter().all(|a| aus.contains(a)), "a corrupted AU was delivered");
-        assert!(g.aus.len() > aus.len() * 8 / 10 && g.lost > 0 && rec > 0, "{} AUs, lost {}, rebuilt {rec}", g.aus.len(), g.lost);
-
-        // without parity: as before (a lost packet drops what it touched at once), nothing rebuilt
-        let plain: Vec<Vec<u8>> = ents.iter().filter(|e| e[0] == 0).cloned().collect();
-        let mut r6 = Rng(31337);
-        let (g, rec) = run(&plain, &mut |_, _| r6.below(10) == 0);
-        assert!(g.aus.iter().all(|a| aus.contains(a)) && rec == 0 && g.lost > 0);
-    }
-
-}
+#[path = "../test/engine.rs"]
+mod tests;

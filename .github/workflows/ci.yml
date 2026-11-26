@@ -1,0 +1,60 @@
+# Builds and tests everything that needs no hardware, on GitHub's runners: the same steps as `bash test/run.sh all`.
+#   linux    the transmitter's host tests (C against the format's Python reference), the Air's scripts parse, hz_vtx
+#            compiles for the Pi, the setup site's JavaScript (where setup_site/ is in the repository), and all four
+#            radio firmware builds (kept as artifacts)
+#   windows  Horizon Receiver's unit tests and formatting
+# The Air's hz_vtx needs the Luckfox SDK and its camera libraries, so it is built by the release scripts
+# (luckfox_image/air_build.sh), not here.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-arm-none-eabi libnewlib-arm-none-eabi cmake python3-numpy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: pico-sdk 2.2.0
+        run: |
+          git clone -q --depth 1 -b 2.2.0 https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk-2.2.0
+          git -C ~/pico-sdk-2.2.0 submodule update -q --init --depth 1 lib/tinyusb
+      - name: Tests and builds (test/run.sh all)
+        run: bash test/run.sh all
+        env:
+          HZ_FW_BUILD: ${{ runner.temp }}/fw
+      - name: Firmware files
+        run: |
+          mkdir -p firmware
+          for t in air_radio hat_tx hat_rx ground_unit; do cp "$RUNNER_TEMP/fw/$t.uf2" "$RUNNER_TEMP/fw/$t.bin" firmware/; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: radio-firmware
+          path: firmware/
+
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: desktop_receiver
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop_receiver
+      - name: Formatting (cargo fmt)
+        run: cargo fmt --check
+      - name: Unit tests
+        run: cargo test --lib

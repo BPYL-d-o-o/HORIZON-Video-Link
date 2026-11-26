@@ -1,16 +1,17 @@
 #!/bin/sh
 # Builds the Horizon Pi image: Raspberry Pi OS Lite (64-bit, pi_image/raspios.pin) with the Pi transmitter
-# (pi5_vtx/live_sender.py, its x265 frame encoder, swfec.py) installed in /opt/horizon and started at boot by the
-# lora-vlink-tx service. For a Raspberry Pi 5 with a camera and the Horizon HAT (TX RP2350 + LR2021 on SPI0.0).
+# (hz_vtx and its encoder hz_x265, built from transmitter/ in the image) installed in /opt/horizon and started at boot
+# by the horizon_vtx service. For a Raspberry Pi 5 with a camera and the Horizon HAT (TX RP2350 + LR2021 on SPI0.0).
 #
 #   sudo sh pi_image/build_pi_image.sh OUT_DIR [VERSION]          (Linux or WSL as root; needs qemu-user-static
 #                                                                   with binfmt for aarch64, losetup, parted, resize2fs)
 #
 # The image keeps nothing per unit: the frequency plan, the TX power and the callsign live in the HAT (the setup site's
-# Pair saves them there over the HAT's USB port), and the sender uses what the HAT has. No login is set up: the unit
-# works without one; Raspberry Pi Imager's OS customisation can add a user, Wi-Fi and SSH when writing the card.
-# Writes OUT_DIR/horizon-pi5-VERSION.img.xz, its .sha256 and manifest.json. Downloads are cached in CACHE_DIR
-# (default ~/horizon-image/cache). Prints RESULT PASS|FAIL.
+# Pair saves them there over the HAT's USB port), and the sender uses what the HAT has. Login: user "pi", password
+# "raspberry", SSH on (hostname horizon-air); Raspberry Pi Imager's OS customisation can add a user and Wi-Fi.
+# Writes OUT_DIR/horizon-pi5-VERSION.img.xz, its .sha256 and manifest.json. The Raspberry Pi OS download and the base
+# with the packages installed are cached in CACHE_DIR (default ~/horizon-image/cache): the first build after a new
+# release or package list takes ~10 min (emulated apt), later ones a few. Prints RESULT PASS|FAIL.
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(dirname "$here")
@@ -33,6 +34,13 @@ if ! echo "$sum  $cache/$base" | sha256sum -c --status 2>/dev/null; then
     echo "$sum  $cache/$base" | sha256sum -c --status || fail "$base: SHA-256 does not match raspios.pin"
 fi
 
+# The base (Raspberry Pi OS grown by grow_mb, packages installed: slow, apt runs emulated) is cached as
+# base-<key>.img, keyed by the release, the package list, the grow size and BASE_REV (bump it when the base steps change).
+PKGS="libcamera-dev libx265-dev gcc g++ pkg-config libc6-dev"
+BASE_REV=1
+key=$(printf '%s|%s|%s|%s' "$sum" "$PKGS" "$grow_mb" "$BASE_REV" | sha256sum | cut -c1-16)
+based=$cache/base-$key.img
+
 work=$(mktemp -d)
 img=$work/horizon.img
 root=$work/root
@@ -48,61 +56,115 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "EVENT unpacking and growing the image by $grow_mb MB"
-xz -dc "$cache/$base" >"$img"
 # The image's ext4 uses features newer than many hosts' e2fsprogs (orphan_file: e2fsprogs 1.47): its own aarch64
-# e2fsck / resize2fs do the resize, run by qemu from a read-only copy of the base image.
-cp "$img" "$work/sys.img"
-sysloop=$(losetup -fP -r --show "$work/sys.img")
-mkdir -p "$work/sys"
-mount -o ro "${sysloop}p2" "$work/sys"
+# e2fsck / resize2fs do the work, run by qemu from a read-only mount of a Raspberry Pi OS image ("sys").
 e2tool() { qemu-aarch64-static -L "$work/sys" "$work/sys/usr/sbin/$1" "$2" "$3"; }
-truncate -s +"${grow_mb}M" "$img"
-parted -s "$img" resizepart 2 100%
-loop=$(losetup -fP --show "$img")
-e2tool e2fsck -fy "${loop}p2" >/dev/null 2>&1 || true
-e2tool resize2fs -p "${loop}p2" >/dev/null 2>&1 || fail "resize2fs"
-mkdir -p "$root"
-mount "${loop}p2" "$root"
-mount "${loop}p1" "$root/boot/firmware"
-for m in proc sys dev dev/pts run; do mount --bind "/$m" "$root/$m"; done
-cp /etc/resolv.conf "$root/etc/resolv.conf.horizon"
-mv "$root/etc/resolv.conf" "$root/etc/resolv.conf.orig" 2>/dev/null || true
-cp "$root/etc/resolv.conf.horizon" "$root/etc/resolv.conf"
-printf '#!/bin/sh\nexit 101\n' >"$root/usr/sbin/policy-rc.d"; chmod 755 "$root/usr/sbin/policy-rc.d"   # no services start in the chroot
+sys_up() { sysloop=$(losetup -fP -r --show "$1"); mkdir -p "$work/sys"; mount -o ro "${sysloop}p2" "$work/sys"; }
+sys_down() { umount "$work/sys"; losetup -d "$sysloop"; sysloop=; }
+# the image ($loop) mounted at $root as a chroot: host DNS, no services started
+chroot_up() {
+    mkdir -p "$root"
+    mount "${loop}p2" "$root"
+    mount "${loop}p1" "$root/boot/firmware"
+    for m in proc sys dev dev/pts run; do mount --bind "/$m" "$root/$m"; done
+    cp /etc/resolv.conf "$root/etc/resolv.conf.horizon"
+    mv "$root/etc/resolv.conf" "$root/etc/resolv.conf.orig" 2>/dev/null || true
+    cp "$root/etc/resolv.conf.horizon" "$root/etc/resolv.conf"
+    printf '#!/bin/sh\nexit 101\n' >"$root/usr/sbin/policy-rc.d"; chmod 755 "$root/usr/sbin/policy-rc.d"
+}
+chroot_down() {
+    rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/resolv.conf.horizon"
+    mv "$root/etc/resolv.conf.orig" "$root/etc/resolv.conf" 2>/dev/null || true
+    sync
+    for m in boot/firmware dev/pts dev proc sys run; do umount "$root/$m"; done
+    umount "$root"
+}
 
-echo "EVENT installing packages (emulated, several minutes)"
-chroot "$root" /bin/sh -ec 'export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends python3-picamera2 python3-numpy python3-serial libx265-dev gcc libc6-dev >/dev/null
-    apt-get clean' || fail "apt in the image"
+if [ ! -s "$based" ]; then
+    echo "EVENT building the base (Raspberry Pi OS + packages, emulated, several minutes; cached as $(basename "$based"))"
+    xz -dc "$cache/$base" >"$img"
+    cp "$img" "$work/sys.img"; sys_up "$work/sys.img"
+    truncate -s +"${grow_mb}M" "$img"
+    parted -s "$img" resizepart 2 100%
+    loop=$(losetup -fP --show "$img")
+    e2tool e2fsck -fy "${loop}p2" >/dev/null 2>&1 || true
+    e2tool resize2fs -p "${loop}p2" >/dev/null 2>&1 || fail "resize2fs"
+    chroot_up
+    chroot "$root" /bin/sh -ec "export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends $PKGS >/dev/null
+        apt-get clean" || fail "apt in the image"
+    chroot_down
+    e2tool e2fsck -fy "${loop}p2" >/dev/null 2>&1 || true
+    losetup -d "$loop"; loop=
+    sys_down; rm -f "$work/sys.img"
+    rm -f "$cache"/base-*.img "$cache"/base-*.img.part   # the base of an earlier release or package list
+    cp --sparse=always "$img" "$based.part" && mv "$based.part" "$based"
+else
+    echo "EVENT using the cached base $(basename "$based")"
+    cp --sparse=always "$based" "$img"
+fi
+sys_up "$based"
+loop=$(losetup -fP --show "$img")
+chroot_up
 
 echo "EVENT installing the Horizon transmitter in /opt/horizon"
 h=$root/opt/horizon
-mkdir -p "$h/pi5_vtx"
-# the sender and the modules it imports: swtx (packets), swfec (format, CRC, RS, callsign), blockfec (block FEC parity)
-for f in live_sender.py sender.py swtx.py swfec.py blockfec.py frame_enc.c tx_power.sh; do cp "$repo/pi5_vtx/$f" "$h/pi5_vtx/"; done
+# hz_vtx and hz_x265, built in the image (emulated): the sources in a scratch folder, only the programs stay
+mkdir -p "$h" "$root/tmp/hz-src"
+cp -r "$repo/transmitter" "$repo/format" "$root/tmp/hz-src/"
+rm -rf "$root/tmp/hz-src/transmitter/build" "$root/tmp/hz-src/transmitter/test"
+chroot "$root" env HZ_GIT="$ver" sh /tmp/hz-src/transmitter/build_pi.sh /tmp/hz-src/out >/dev/null || fail "hz_vtx build"
+install -m 755 "$root/tmp/hz-src/out/hz_vtx" "$root/tmp/hz-src/out/hz_x265" "$repo/pi_image/tx_power.sh" "$repo/pi_image/tx_source.sh" "$h/"
+rm -rf "$root/tmp/hz-src"
 echo "$ver" >"$h/VERSION"
-chroot "$root" gcc -O2 -o /opt/horizon/pi5_vtx/frame_enc /opt/horizon/pi5_vtx/frame_enc.c -lx265 -lm || fail "frame_enc"
-chmod 755 "$h/pi5_vtx/tx_power.sh"
-# every module the sender needs must import in the image (a missing one only shows when its code first runs)
-chroot "$root" /usr/bin/python3 -c 'import sys; sys.path[:0] = ["/opt/horizon/pi5_vtx"]
-import swtx, sender, blockfec, swfec, live_sender
-s = swtx.Scheduler(fec=(8, 4, 1)); s.push(bytes(3000))
-for _ in range(20): s.next_record()
-print("sender modules ok")' || fail "the sender's modules do not import in the image"
+# both programs must start in the image (a missing library only shows on the Pi)
+chroot "$root" /opt/horizon/hz_vtx --version | grep -q "git=$ver" || fail "hz_vtx does not run in the image"
+chroot "$root" /opt/horizon/hz_x265 2>&1 | grep -q usage || fail "hz_x265 does not run in the image"
+echo "EVENT hz_vtx and hz_x265 built and run"
 # the service user: camera, SPI, the HAT's USB serial port
 chroot "$root" /bin/sh -ec 'id horizon >/dev/null 2>&1 || useradd --system --no-create-home --home-dir /opt/horizon --shell /usr/sbin/nologin horizon
     for g in video spi gpio dialout; do getent group $g >/dev/null && usermod -aG $g horizon; done'
-# (a camera unit usually has no network: the service must not wait for one)
-sed -e 's|^User=.*|User=horizon|' -e 's|/home/test/pi5_vtx|/opt/horizon/pi5_vtx|g' -e '/network-online/d' \
-    "$repo/pi5_vtx/lora-vlink-tx.service" >"$root/etc/systemd/system/lora-vlink-tx.service"
-cat >"$root/etc/default/lora-vlink-tx" <<'EOF'
-# Extra options for /opt/horizon/pi5_vtx/live_sender.py (python3 live_sender.py --help). Empty: the camera at
-# 576x320, block FEC 8+4, and the frequency plan, TX power and callsign the HAT keeps (the setup site's Pair).
-LORA_TX_ARGS="--link spi"
+# Login: user "pi", password "raspberry", SSH on. The first-boot "create a user" dialog is off, and cloud-init must not
+# lock the password at first boot. Imager's OS customisation still adds the user it is given.
+chroot "$root" /bin/sh -ec 'usermod -s /bin/bash -d /home/pi -m pi 2>/dev/null || usermod -s /bin/bash pi
+    mkdir -p /home/pi && chown pi:pi /home/pi
+    for g in adm dialout cdrom audio users sudo video plugdev input gpio spi i2c netdev render; do
+        getent group $g >/dev/null && usermod -aG $g pi; done
+    echo pi:raspberry | chpasswd
+    printf "pi ALL=(ALL) NOPASSWD:ALL\n" >/etc/sudoers.d/010_pi-nopasswd; chmod 440 /etc/sudoers.d/010_pi-nopasswd
+    systemctl disable userconfig.service >/dev/null 2>&1 || true
+    systemctl enable ssh.service >/dev/null 2>&1' || fail "pi user / ssh"
+# Horizon maintainer key (pi_image/authorized_keys): a public key that can SSH into every unit written from this image.
+if [ -s "$here/authorized_keys" ]; then
+    mkdir -p "$root/home/pi/.ssh"
+    cp "$here/authorized_keys" "$root/home/pi/.ssh/authorized_keys"
+    chroot "$root" /bin/sh -ec 'chown -R pi:pi /home/pi/.ssh; chmod 700 /home/pi/.ssh; chmod 600 /home/pi/.ssh/authorized_keys'
+    echo "EVENT installed the maintainer key ($(wc -l <"$here/authorized_keys") key(s)) for pi"
+fi
+cat >"$root/etc/cloud/cloud.cfg.d/99_zz-horizon.cfg" <<'EOF'
+# Horizon: the image's user "pi" (password "raspberry") keeps its password: the base config would lock it at first boot.
+system_info:
+  distro: raspberry-pi-os
+  default_user:
+    name: pi
+    lock_passwd: False
+    gecos: Raspberry Pi OS
+    groups: [adm, dialout, cdrom, audio, users, sudo, video, games, plugdev, input, gpio, spi, i2c, netdev, render, lpadmin]
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    shell: /bin/bash
+  network:
+    renderers: ['netplan', 'network-manager']
+    activators: ['netplan', 'network-manager']
+  disable_fallback_netcfg: true
+  ntp_client: 'systemd-timesyncd'
+  ssh_svcname: ssh
+ssh_pwauth: true
 EOF
-chroot "$root" systemctl enable lora-vlink-tx.service >/dev/null 2>&1 || fail "enable lora-vlink-tx"
+# (a camera unit usually has no network: the service must not wait for one)
+cp "$repo/pi_image/horizon_vtx.service" "$root/etc/systemd/system/horizon_vtx.service"
+cp "$repo/pi_image/horizon_vtx.default" "$root/etc/default/horizon_vtx"
+chroot "$root" systemctl enable horizon_vtx.service >/dev/null 2>&1 || fail "enable horizon_vtx"
 # SPI0 to the HAT's RP2350; the camera is auto-detected (the image's default)
 cfg=$root/boot/firmware/config.txt
 grep -q '^dtparam=spi=on' "$cfg" || sed -i 's/^#\{0,1\}dtparam=spi=.*/dtparam=spi=on/' "$cfg"
@@ -110,16 +172,12 @@ grep -q '^dtparam=spi=on' "$cfg" || echo 'dtparam=spi=on' >>"$cfg"
 echo horizon-air >"$root/etc/hostname"
 sed -i 's/127\.0\.1\.1.*/127.0.1.1\thorizon-air/' "$root/etc/hosts"
 
-rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/resolv.conf.horizon"
-mv "$root/etc/resolv.conf.orig" "$root/etc/resolv.conf" 2>/dev/null || true
 card=$(stat -c %s "$img")
 used=$(df -B1 --output=used "$root" | tail -1)
-sync
-for m in boot/firmware dev/pts dev proc sys run; do umount "$root/$m"; done
-umount "$root"
+chroot_down
 e2tool e2fsck -fy "${loop}p2" >/dev/null 2>&1 || true
 losetup -d "$loop"; loop=
-umount "$work/sys"; losetup -d "$sysloop"; sysloop=
+sys_down
 
 file=horizon-pi5-$ver.img.xz
 echo "EVENT compressing $file"

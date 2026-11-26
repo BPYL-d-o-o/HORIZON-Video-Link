@@ -1,14 +1,17 @@
 #!/bin/sh
 # On the Horizon Dev Air: keeps the RP2354A radio controller on the firmware this image carries, then starts the
-# transmitter. The RP2354A has no USB on this board; it is flashed over SWD by OpenOCD on the Luckfox
-# (SWCLK = GPIO1_D2, SWDIO = GPIO1_D3; I2C3_M1 must stay off in /etc/luckfox.cfg).
+# transmitter. The RP2354A has no USB on this board. Its firmware is written over the SPI host link when the firmware
+# it runs takes updates that way (rp2354_spi_update, about 2 s); otherwise, or when that fails, over SWD by OpenOCD on
+# the Luckfox (~14 s; SWCLK = GPIO1_D2, SWDIO = GPIO1_D3; I2C3_M1 must stay off in /etc/luckfox.cfg).
 #
 #   sh rp2354_update.sh boot     at boot (S99horizon_vtx): flash if the image's firmware is not the one last flashed,
 #                                start the service, and flash once more if the RP2354A then does not answer
 #   sh rp2354_update.sh flash [ELF]
-#                                flash now (stops and restarts the service); ELF: another firmware (a test build,
-#                                luckfox_vtx/flash_rp2354.sh). It stays until the next power-up or update, which
-#                                put the image's own firmware back.
+#                                flash now (stops and restarts the service); ELF: another firmware (a test build).
+#                                It stays until the next power-up or update, which put the image's own firmware
+#                                back. From a computer:
+#                                  adb push FIRMWARE.elf /userdata/test.elf
+#                                  adb shell sh /usr/share/horizon/rp2354_update.sh flash /userdata/test.elf
 #   sh rp2354_update.sh check    print what would be done
 #
 # Prints EVENT lines and RESULT PASS|FAIL (to syslog, tag horizon_vtx, when run at boot).
@@ -16,8 +19,10 @@ set -u
 share=/usr/share/horizon
 dir=/userdata/horizon_vtx
 elf=$share/rp2354.elf
+bin=$share/rp2354.bin   # the same firmware as a flat image, for the SPI update
 if [ "${1:-}" = flash ] && [ -n "${2:-}" ]; then
     elf=$2
+    bin=${2%.elf}.bin       # a test build: its .bin beside it, if there is one (else SWD only)
     [ -s "$elf" ] || { echo "FATAL no firmware $elf"; echo "RESULT FAIL"; exit 1; }
 fi
 mark=$dir/rp2354.flashed          # md5 of the firmware last flashed successfully
@@ -27,6 +32,20 @@ want=$(md5sum <"$elf" | cut -d' ' -f1)
 have=$(cat "$mark" 2>/dev/null)
 
 flash() {
+    # 1. over SPI, when the running firmware takes it (exit 3: it does not, or nothing was written: try SWD)
+    if [ -s "$bin" ] && [ -x "$share/rp2354_spi_update" ]; then
+        echo "EVENT rp2354_flash spi start firmware=$want"
+        out=$("$share/rp2354_spi_update" "$bin" 2>&1)
+        rc=$?
+        echo "$out" | grep -E "^(EVENT|ERROR)" | sed 's/^/  /'
+        if [ "$rc" = 0 ]; then
+            echo "$want" >"$mark" && sync
+            echo "EVENT rp2354_flash ok (spi)"
+            return 0
+        fi
+        echo "EVENT rp2354_flash spi failed rc=$rc: over SWD"
+    fi
+    # 2. over SWD
     chip=1   # gpiochip of GPIO bank 1 (sysfs base 32), for libgpiod
     for d in /sys/class/gpio/gpiochip*; do
         [ "$(cat "$d/base" 2>/dev/null)" = 32 ] || continue
@@ -48,7 +67,7 @@ EOF
     echo "$out" | grep -E "Programming|[Vv]erified|Error|DPIDR" | sed 's/^/  /'
     if [ "$rc" = 0 ] && echo "$out" | grep -qi verified; then
         echo "$want" >"$mark" && sync
-        echo "EVENT rp2354_flash ok"
+        echo "EVENT rp2354_flash ok (swd)"
         return 0
     fi
     echo "ERROR rp2354_flash failed rc=$rc"

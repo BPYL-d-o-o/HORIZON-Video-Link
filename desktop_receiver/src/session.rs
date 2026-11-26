@@ -1,9 +1,7 @@
 //! Sessions: one folder per recording, holding everything about a flight.
 //!   packets.rxlog  every line from the Ground, "<unix time> <line>" (the video is in these packets: replay and export
 //!                  decode it again, with the same decoder as live)
-//!   stats.csv      the link statistics twice a second (stats.rs: the Python receiver's columns)
-//! The Python receiver's log folders (log_*) are listed and opened too; without packets.rxlog they have graphs but no
-//! video.
+//!   stats.csv      the link statistics twice a second (stats.rs)
 use crate::stats::{Sample, STAT_FIELDS};
 use serde::Serialize;
 use std::fs::File;
@@ -11,22 +9,25 @@ use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 pub fn unix_now() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// The folder chosen in the Settings (Recordings, Change…), if any.
 pub static OUT_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Where sessions go: the chosen folder, else ~/HorizonReceiver, or ~/LoRaVideoRX when only that exists (the earlier Python
-/// receiver's folder).
+/// Where sessions go: the chosen folder, else ~/HorizonReceiver.
 pub fn out_dir() -> PathBuf {
     if let Some(d) = OUT_DIR.lock().unwrap().clone() {
         return d;
     }
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
-    let new = home.join("HorizonReceiver");
-    let old = home.join("LoRaVideoRX");
-    if !new.is_dir() && old.is_dir() { old } else { new }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join("HorizonReceiver")
 }
 
 // ---- recording
@@ -47,7 +48,14 @@ impl Recorder {
         let raw = BufWriter::new(File::create(dir.join("packets.rxlog"))?);
         let mut stats = BufWriter::new(File::create(dir.join("stats.csv"))?);
         stats.write_all(Sample::csv_header().as_bytes())?;
-        Ok(Recorder { dir, started: unix_now(), raw, stats, last_flush: 0.0, bytes: 0 })
+        Ok(Recorder {
+            dir,
+            started: unix_now(),
+            raw,
+            stats,
+            last_flush: 0.0,
+            bytes: 0,
+        })
     }
     pub fn line(&mut self, t: f64, line: &str) {
         let s = format!("{t:.4} {line}\n");
@@ -82,7 +90,12 @@ impl Table {
         let cols: Vec<String> = lines.next()?.ok()?.trim().split(',').map(|s| s.to_string()).collect();
         let mut rows: Vec<Vec<f64>> = lines
             .filter_map(|l| l.ok())
-            .map(|l| l.trim().split(',').map(|v| v.parse::<f64>().unwrap_or(f64::NAN)).collect::<Vec<f64>>())
+            .map(|l| {
+                l.trim()
+                    .split(',')
+                    .map(|v| v.parse::<f64>().unwrap_or(f64::NAN))
+                    .collect::<Vec<f64>>()
+            })
             .filter(|r| r.len() == cols.len() && r[0].is_finite())
             .collect();
         rows.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -124,7 +137,7 @@ const EVENT_COUNTERS: &[(&str, &str)] = &[
 const MERGE_S: f64 = 2.0; // problems closer than this are one
 const GAP_S: f64 = 3.0; // no statistics for this long: the receiver was not running
 
-/// Problems in a session (as the Python log viewer finds them): rows where a trouble counter rose, merged when close,
+/// Problems in a session: rows where a trouble counter rose, merged when close,
 /// with the lowest link quality in each; and gaps in the statistics.
 pub fn problems(t: &Table) -> Vec<Problem> {
     let Some(time) = t.col("time") else { return Vec::new() };
@@ -172,7 +185,11 @@ pub fn problems(t: &Table) -> Vec<Problem> {
         .collect();
     for w in time.windows(2) {
         if w[1] - w[0] > GAP_S {
-            out.push(Problem { start: w[0], end: w[1], text: format!("no statistics for {:.0} s (receiver not running?)", w[1] - w[0]) });
+            out.push(Problem {
+                start: w[0],
+                end: w[1],
+                text: format!("no statistics for {:.0} s (receiver not running?)", w[1] - w[0]),
+            });
         }
     }
     out.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -196,12 +213,23 @@ pub struct Summary {
 }
 
 fn dir_bytes(d: &Path) -> u64 {
-    std::fs::read_dir(d).map(|r| r.filter_map(|e| e.ok()).filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()).unwrap_or(0)
+    std::fs::read_dir(d)
+        .map(|r| {
+            r.filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// A session's summary from its stats.csv (and its files).
 pub fn summarize(dir: &Path, t: Option<&Table>) -> Summary {
-    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut s = Summary {
         dir: dir.to_string_lossy().into_owned(),
         name,
@@ -230,7 +258,10 @@ pub fn summarize(dir: &Path, t: Option<&Table>) -> Summary {
     s.frames = tot("frames");
     s.lost = tot("blocks_lost");
     s.problems = problems(t).len();
-    if let Some(mut r) = t.col("rssi_dbm").map(|v| v.into_iter().filter(|x| x.is_finite()).collect::<Vec<_>>()) {
+    if let Some(mut r) = t
+        .col("rssi_dbm")
+        .map(|v| v.into_iter().filter(|x| x.is_finite()).collect::<Vec<_>>())
+    {
         if !r.is_empty() {
             r.sort_by(|a, b| a.total_cmp(b));
             s.rssi_median = Some(r[r.len() / 2]);
@@ -240,17 +271,17 @@ pub fn summarize(dir: &Path, t: Option<&Table>) -> Summary {
     s
 }
 
-/// The sessions in `base`, newest first: this app's flight_* and the Python receiver's log_* folders.
+/// The sessions in `base` (flight_* folders), newest first.
 pub fn list(base: &Path) -> Vec<Summary> {
     let mut out: Vec<Summary> = std::fs::read_dir(base)
         .map(|r| {
             r.filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
-                .filter(|p| p.file_name().is_some_and(|n| {
-                    let n = n.to_string_lossy();
-                    n.starts_with("flight_") || n.starts_with("log_")
-                }))
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("flight_"))
+                })
                 .filter(|p| p.join("stats.csv").is_file() || p.join("packets.rxlog").is_file())
                 .map(|p| {
                     let t = Table::load(&p.join("stats.csv"));
@@ -278,9 +309,23 @@ pub fn load_flight(dir: &Path) -> Result<Flight, String> {
     let time = t.col("time").unwrap_or_default();
     let series = STAT_FIELDS
         .iter()
-        .filter_map(|(k, _, _)| t.col(k).map(|v| (k.to_string(), v.into_iter().map(|x| if x.is_finite() { Some(x) } else { None }).collect())))
+        .filter_map(|(k, _, _)| {
+            t.col(k).map(|v| {
+                (
+                    k.to_string(),
+                    v.into_iter()
+                        .map(|x| if x.is_finite() { Some(x) } else { None })
+                        .collect(),
+                )
+            })
+        })
         .collect();
-    Ok(Flight { summary: summarize(dir, Some(&t)), problems: problems(&t), time, series })
+    Ok(Flight {
+        summary: summarize(dir, Some(&t)),
+        problems: problems(&t),
+        time,
+        series,
+    })
 }
 
 // ---- packets.rxlog
@@ -327,9 +372,18 @@ mod tests {
     use super::*;
     #[test]
     fn problems_merge_and_gaps() {
-        let mut t = Table { cols: vec!["time".into(), "lq_pct".into(), "blocks_lost".into()], rows: Vec::new() };
+        let mut t = Table {
+            cols: vec!["time".into(), "lq_pct".into(), "blocks_lost".into()],
+            rows: Vec::new(),
+        };
         for i in 0..20 {
-            let lost = if i < 5 { 0.0 } else if i < 7 { 3.0 } else { 4.0 };
+            let lost = if i < 5 {
+                0.0
+            } else if i < 7 {
+                3.0
+            } else {
+                4.0
+            };
             let lq = if i == 5 { 60.0 } else { 100.0 };
             t.rows.push(vec![100.0 + i as f64 * 0.5, lq, lost]);
         }
